@@ -499,3 +499,122 @@ class HsacoKernel:
 
 def jit(triton_kernel, stream=None):
     return HsacoKernel(triton_kernel, stream)
+
+
+"""
+asmjit prebuilt .co format binary kernel:
+    - the kernel has a python host-side-wrapper which knows how to call it (determine grid/block, provide args)
+    - each kernel has multiple specialized implementations (for performance reason), each impl has a unique file name
+      which contains only 1 kernel with the same name as the file name (for eaiser mapping from profiling)
+    - each version's name has self-explainable compile-time constexprs embedded, like "fmoe_gateup__OC_4096_IC_128_dtype_fp8"
+    - the python host-side-wrapper requires a specific impl name to lauch a kernel, this name is given by tune process
+"""
+from ctypes.util import find_library
+import functools
+@functools.cache
+def _get_hiplib():
+    try:
+        lib = ctypes.CDLL(find_library("amdhip64"))
+    except Exception as e:
+        import torch
+        torch_amdhip64 = os.path.join(torch.__path__[0], "lib", "libamdhip64.so")
+        lib = ctypes.CDLL(torch_amdhip64)
+    lib.hipModuleLoad.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p]
+    lib.hipModuleLoad.restype = ctypes.c_int32
+    lib.hipModuleGetFunction.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_char_p]
+    lib.hipModuleGetFunction.restype = ctypes.c_int32
+    lib.hipModuleLaunchKernel.argtypes = [ctypes.c_void_p, 
+                                    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+                                    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+                                    ctypes.c_uint32, # unsigned int sharedMemBytes
+                                    ctypes.c_void_p, # hipStream_t stream
+                                    ctypes.c_void_p, # void **kernelParams
+                                    ctypes.c_void_p, # void **extra
+                                    ]
+    lib.hipModuleLaunchKernel.restype = ctypes.c_int32
+    lib.hipGetErrorString.argtypes = [ctypes.c_int32]
+    lib.hipGetErrorString.restype = ctypes.c_char_p
+    return lib
+
+def hip_check_error(err):
+    if err != 0:
+        raise Exception("HIP error:" + _get_hiplib().hipGetErrorString(err).decode("utf-8"))
+
+@functools.cache
+def hipModuleGetFunction(module_fpath, func_name):
+    p_module = ctypes.c_void_p()
+    hip_check_error(_get_hiplib().hipModuleLoad(ctypes.byref(p_module), module_fpath.encode('utf-8')))
+    p_func = ctypes.c_void_p()
+    hip_check_error(_get_hiplib().hipModuleGetFunction(ctypes.byref(p_func), p_module, func_name.encode('utf-8')))
+    return p_func
+
+class JKernel:
+    # cached factory
+    @classmethod
+    @lru_cache(maxsize=None)
+    def create(cls, hsaco_kernel_path, kernel_impl_name):
+        self = cls()
+        self.hsaco_kernel_path = hsaco_kernel_path
+        self.kernel_impl_name = kernel_impl_name
+        self.p_func = None
+        return self
+
+    # check if current kernel supports some compile-time args
+    def supports(self, **kw_constexprs):
+        for k,v in kw_constexprs.items():
+            if "_{k}_{v}_" not in self.kernel_impl_name:
+                return False
+        return True
+
+    def __call__(self, grid:list[int], block:list[int], *args, shared_mem_bytes=0, stream=None):
+        if self.p_func is None:
+            self.p_func = hipModuleGetFunction(self.hsaco_kernel_path, self.kernel_impl_name)
+            # create host-side calling args
+            global torch
+            import torch
+            fields = []
+            for i,arg in enumerate(args):
+                if isinstance(arg, torch.Tensor):
+                    fields.append((f"arg_{i}", ctypes.c_void_p))
+                elif isinstance(arg, int):
+                    fields.append((f"arg_{i}", ctypes.c_int))
+                elif isinstance(arg, float): 
+                    fields.append((f"arg_{i}", ctypes.c_float))
+                else:
+                    raise Exception(f"Unsupported arg type: {type(arg)}")
+            class Args(ctypes.Structure):
+                _fields_ = fields
+            self.args = Args()
+            ExtraType = ctypes.c_void_p * 5
+            self.arg_size = ctypes.c_uint64(ctypes.sizeof(self.args))
+            self.config = ExtraType(1, ctypes.addressof(self.args), 2, ctypes.addressof(self.arg_size), 3)
+
+        # fill args
+        for i,a in enumerate(args):
+            if isinstance(a, torch.Tensor):
+                setattr(self.args, f"arg_{i}", a.data_ptr())
+            else:
+                setattr(self.args, f"arg_{i}", a)
+        while len(grid) < 3:
+            grid.append(1)
+        while len(block) < 3:
+            block.append(1)
+        if stream is None:
+            stream = ctypes.cast(torch.cuda.current_stream(), ctypes.c_void_p)
+        hip_check_error(_get_hiplib().hipModuleLaunchKernel(self.p_func, *grid, *block, shared_mem_bytes, stream, 0, ctypes.byref(self.config)))
+
+@lru_cache(maxsize=None)
+def get_jkernels(kernel_name):
+    """
+    - tuner use this function to get all suitable kernels
+    - python wrapper also use this function + impl_name to invoke a particular kernel impl
+    """
+    kernel_folder = f"{AITER_CORE_DIR}/hsa/jkernels/"
+    kernel_family = {}
+    for co_file_name in os.listdir(kernel_folder):
+        hsaco_kernel_path = os.path.join(kernel_folder, co_file_name)
+        if os.path.isfile(hsaco_kernel_path) and co_file_name.startswith(kernel_name) and co_file_name.endswith(".co"):
+            impl_name = co_file_name[:-3] # remove .co
+            kernel_family[impl_name] = JKernel.create(hsaco_kernel_path, impl_name)
+
+    return kernel_family

@@ -2234,7 +2234,7 @@ class FmoeTuner(TunerCommon):
     ):
         self._flydsl_fallbacks = []
         mp_num = args.mp
-        blockMs = [16, 32, 64, 128]
+        blockMs = [16, 32, 64, 128, 256]
         keys = self.keys
 
         print(untunedf[keys])

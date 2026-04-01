@@ -704,6 +704,31 @@ def _flydsl_stage2_wrapper(
         sorted_weights=sorted_weights,
     )
 
+import atexit
+
+_shapes = {}
+def LogShape(keys, cfg):
+    str_key = "[hit]:" if cfg is not None else "[miss]:"
+    for k in keys:
+        if isinstance(k, bool):
+            kv = int(k)
+        else:
+            kv = k
+        str_key += f"{kv},"
+    if str_key in _shapes:
+        _shapes[str_key] += 1
+    else:
+        _shapes[str_key] = 1
+
+def cleanup():
+    import filelock
+    with filelock.FileLock('.shapeslog.lock'):
+        print("collected keys: ")
+        for k,v in _shapes.items():
+            print(f"x{v:6} {k}")
+
+atexit.register(cleanup)
+
 
 @functools.lru_cache(maxsize=2048)
 def get_2stage_cfgs(
@@ -832,6 +857,11 @@ def get_2stage_cfgs(
 
     # cfg = cfg_2stages.get(keys, None)
     cfg = cfg_2stages.get(keys, None) if cfg_2stages and use_cfg() else None
+    if cfg:
+        print(type(cfg), cfg)
+        assert 0
+    LogShape(keys, cfg)
+
     if cfg is None and os.environ.get("AITER_ONLINE_TUNE", "0") == "1":
         lock_path = os.path.join(bd_dir, f"lock_fmoe_tune_{keys}")
         mp_lock(lock_path, MainFunc=MainFunc, FinalFunc=FinalFunc)
@@ -982,6 +1012,49 @@ def get_2stage_cfgs(
             int(ksplit),
             run_1stage,
         )
+
+    is_hsaco1 = bool(kernelName1) and kernelName1.startswith("hsaco_")
+    is_hsaco2 = bool(kernelName2) and kernelName2.startswith("hsaco_")
+    if (is_hsaco1 or is_hsaco2):
+        if is_hsaco1:
+            stage1_func = functools.partial(
+                _flydsl_stage1_wrapper,
+                kernelName=kernelName1,
+                activation=activation,
+            )
+        else:
+            stage1_func = functools.partial(
+                ck_moe_stage1,
+                kernelName=kernelName1,
+                activation=activation,
+                quant_type=q_type,
+                dtype=dtype,
+                splitk=ksplit,
+                use_non_temporal_load=use_non_temporal_load,
+            )
+
+        if is_hsaco2:
+            stage2_func = functools.partial(
+                _flydsl_stage2_wrapper,
+                kernelName=kernelName2,
+            )
+        else:
+            stage2_func = functools.partial(
+                aiter.ck_moe_stage2_fwd,
+                kernelName=kernelName2,
+                activation=activation,
+                quant_type=q_type,
+                use_non_temporal_load=use_non_temporal_load,
+            )
+
+        return MOEMetadata(
+            stage1_func,
+            stage2_func,
+            block_m,
+            int(ksplit),
+            run_1stage,
+        )
+
     if (
         dtype in [dtypes.bf16, dtypes.fp16]
         and q_type == QuantType.per_1x32
