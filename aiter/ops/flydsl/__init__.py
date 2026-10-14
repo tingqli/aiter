@@ -315,6 +315,8 @@ __all__ = [
 
 _fused_moe_impl_path = "aiter.ops.flydsl.fused_moe_gfx942:run_flydsl_moe_gfx942_impl"
 register_fused_moe_impl("flydsl_gfx942", _fused_moe_impl_path)
+# gfx950 runs only the FP8 blockscale configs of the same backend.
+register_fused_moe_impl("flydsl_gfx950", _fused_moe_impl_path)
 
 
 def __getattr__(name: str):
