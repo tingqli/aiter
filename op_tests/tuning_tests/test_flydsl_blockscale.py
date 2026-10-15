@@ -119,7 +119,7 @@ def _load_cpu_code():
         )
 
     load(
-        "aiter/ops/flydsl/kernels/moe_blockscale_config.py",
+        "aiter/ops/flydsl/kernels/moe_gemm_2stage/gfx9_fp8/a8w8_blockscale_config.py",
         {"m128_down_lds_bytes", "routed_down_lds_bytes"},
     )
     load(
