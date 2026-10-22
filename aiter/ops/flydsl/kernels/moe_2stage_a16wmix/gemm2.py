@@ -512,7 +512,10 @@ def compile_gemm2_a16w4_port(
     if _use_reduce:
         _lds_bytes = max(_a_bytes, BM * TILE_N * 2)
     else:
-        _lds_bytes = _a_bytes + BM * TILE_N * 4
+        # LDS can be reused:
+        #  - K_TILES_TOTAL loop has barrier before writing LDS;
+        #  - persist loop has a barrier at the beginning of each iteration;
+        _lds_bytes = max(_a_bytes, BM * TILE_N * 4)
 
     _wd_tag = "" if w_dtype == "fp4" else f"_{w_dtype}"
     _name = f"gemm2_a16w4{_wd_tag}_port_ne{NE}_h{N_OUT}_i{_K}_bm{BM}_tn{TILE_N}"

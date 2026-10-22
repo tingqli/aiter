@@ -50,7 +50,7 @@ from aiter.jit.core import (
     AITER_ROOT_DIR,
     get_asm_dir,
 )
-from aiter.jit.utils.chip_info import get_gfx, get_gfx_runtime, gfx_from_cu_num
+from aiter.jit.utils.chip_info import get_gfx, get_gfx_runtime, gfx_from_cu_num, get_lds_capacity_bytes
 from aiter.ops.flydsl.moe_common import (
     DEFAULT_SITUV2_BETA,
     DEFAULT_SITUV2_LINEAR_BETA,
@@ -3572,7 +3572,37 @@ class FmoeTuner(TunerCommon):
             "flydsl_moe1_abf16_wfp4_bf16_t16x32x128_w2_bnt0_kw2",
             "flydsl_moe2_abf16_wfp4_bf16_t16x256x256_atomic_bnt2_persist",
             "flydsl_moe1_abf16_wfp4_bf16_t16x32x128_bnt0_xcd4_kw2",
-            "flydsl_moe1_abf16_wfp4_bf16_t16x32x128_w4_xcd1_kw2",            
+            "flydsl_moe1_abf16_wfp4_bf16_t16x32x128_w4_xcd1_kw2",
+            # BM=64 family (gemm1 t64x128x256 beats t32 at large token; gemm2 viable
+            # since its bf16 LDS is max(A, acc)).
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_xcd4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_bnt0",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_bnt0_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_bnt0_xcd4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w2",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w2_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w2_xcd4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w2_bnt0",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w2_bnt0_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w2_bnt0_xcd4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w3",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w3_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w3_xcd4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w3_bnt0",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w3_bnt0_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w3_bnt0_xcd4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w4_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w4_xcd4",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w4_bnt0",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w4_bnt0_xcd1",
+            "flydsl_moe1_abf16_wfp4_bf16_t64x128x256_w4_bnt0_xcd4",
+            "flydsl_moe2_abf16_wfp4_bf16_t64x128x256_atomic",
+            "flydsl_moe2_abf16_wfp4_bf16_t64x128x256_atomic_xcd4",
+            "flydsl_moe2_abf16_wfp4_bf16_t64x128x256_atomic_bnt2",
+            "flydsl_moe2_abf16_wfp4_bf16_t64x128x256_atomic_bnt2_xcd4",            
         ]
         flydsl_s1_kernels = {k:v for k,v in flydsl_s1_kernels.items() if k in filter_names}
         flydsl_s2_kernels = {k:v for k,v in flydsl_s2_kernels.items() if k in filter_names}
@@ -3777,13 +3807,13 @@ class FmoeTuner(TunerCommon):
                 # Skip a16w-mix stage2 candidates the port can't run correctly:
                 #  - _sbm (tile_m<blockM) re-tiles the SORTED [sorted_size, inter]
                 #    stream finer than the moe_sorting padding -> queue fault;
-                #  - LDS is tile_m*(tile_k*2 + tile_n*4); over 160 KiB the build fails;
+                #  - LDS is tile_m * max(tile_k*2, tile_n*4); over LDS capacity the build fails;
                 #  - tile_k must divide inter_dim (K); tile_k=256 on non-256 inter
                 #    (e.g. 384) is parsed verbatim by the wrapper -> OOB/wrong out.
-                _s2_lds = s2_tile_m * (kparams["tile_k"] * 2 + kparams["tile_n"] * 4)
+                _s2_lds = s2_tile_m * max(kparams["tile_k"] * 2, kparams["tile_n"] * 4)
                 if a_dtype_str == "bf16" and (
                     s2_tile_m != blockM
-                    or _s2_lds > 160 * 1024
+                    or _s2_lds > get_lds_capacity_bytes()
                     or inter_dim % kparams["tile_k"] != 0
                 ):
                     continue

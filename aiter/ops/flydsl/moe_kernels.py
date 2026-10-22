@@ -15,6 +15,7 @@ from aiter.ops.flydsl.kernels.tensor_shim import (
 from aiter.ops.flydsl.kernels.tensor_shim import (
     ptr_arg,
 )
+from aiter.jit.utils.chip_info import get_lds_capacity_bytes
 
 _KERNEL_PARAMS: dict[str, dict] = {}
 
@@ -572,7 +573,7 @@ def _register_production_variants_stage2(
 # gfx950 LDS budget per workgroup. A registered name whose LDS request exceeds this
 # is not merely slow, it fails to build ("local memory (N) exceeds limit"), so the
 # tuner never times it and the AOT precompile silently drops the config.
-_MAX_LDS_BYTES = 160 * 1024
+_MAX_LDS_BYTES = get_lds_capacity_bytes()
 
 
 def _gemm1_lds_bytes(tile_m: int, tile_n: int, tile_k: int, k_wave: int) -> int:
