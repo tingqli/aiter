@@ -38,6 +38,8 @@ class Config:
     use_batch1_algorithm: bool = False
     down_block_n: int = 128
     num_oc_splits: int = 1
+    # Stage1 K-tile rotation; None keeps the kernel wrapper's heuristic.
+    k_rotate: bool | None = None
 
     @property
     def is_blockscale_prefill(self):
@@ -96,6 +98,10 @@ class Config:
                 )
         elif (self.down_block_n, self.num_oc_splits) != (128, 1):
             raise ValueError("Down N/OC overrides are supported by blockscale only")
+        if self.k_rotate is not None and (
+            not self.is_blockscale_prefill or type(self.k_rotate) is not bool
+        ):
+            raise ValueError("k_rotate must be a bool on blockscale prefill configs")
 
     def to_string(self):
         # Only direct decoding adds the fifth tile field, so existing strings are unchanged.
@@ -106,6 +112,9 @@ class Config:
         )
         if self.is_blockscale_prefill:
             value += f":{self.down_block_n}:{self.num_oc_splits}"
+            # The optional sixth field is written only for an explicit choice.
+            if self.k_rotate is not None:
+                value += f":{int(self.k_rotate)}"
         return value
 
     @classmethod
@@ -114,11 +123,13 @@ class Config:
         # Configs tuned before the Down suffix existed use the default Down path.
         if len(parts) == 1:
             parts += ["default", "0"]
-        if len(parts) not in (3, 5):
+        if len(parts) not in (3, 5, 6):
             raise ValueError(f"Invalid FlyDSL MoE config: {data!r}")
         tile, down_path, padding = parts[:3]
-        if (down_path in _BLOCKSCALE_PREFILL_PATHS) != (len(parts) == 5):
+        if (down_path in _BLOCKSCALE_PREFILL_PATHS) != (len(parts) >= 5):
             raise ValueError("blockscale configs require Down N and OC split fields")
+        if len(parts) == 6 and parts[5] not in ("0", "1"):
+            raise ValueError(f"Invalid K rotation flag: {parts[5]!r}")
         fields = tile.split("_")
         if len(fields) == 4:
             fields.append("False")
@@ -136,8 +147,9 @@ class Config:
             down_path,
             int(padding),
             use_batch1_algorithm=use_batch1_algorithm == "True",
-            down_block_n=int(parts[3]) if len(parts) == 5 else 128,
-            num_oc_splits=int(parts[4]) if len(parts) == 5 else 1,
+            down_block_n=int(parts[3]) if len(parts) >= 5 else 128,
+            num_oc_splits=int(parts[4]) if len(parts) >= 5 else 1,
+            k_rotate=parts[5] == "1" if len(parts) == 6 else None,
         )
 
     def unsupported_reason(self, problem: "_Problem") -> str | None:
@@ -319,10 +331,20 @@ def get_tune_space():
     if architecture == "gfx950":
         # gfx950 runs only the blockscale configs.
         configs = block_decode
+        # Stage1 K rotation is independent of the Down path; tune both choices.
         configs.extend(
-            Config(256, 256, 128, True, down_path=path, num_oc_splits=splits)
+            Config(
+                256,
+                256,
+                128,
+                True,
+                down_path=path,
+                num_oc_splits=splits,
+                k_rotate=k_rotate,
+            )
             for path in ("block_m128", "block_m128_persistent")
             for splits in (1, 2, 4, 8)
+            for k_rotate in (False, True)
         )
         configs.extend(
             Config(
@@ -333,9 +355,11 @@ def get_tune_space():
                 down_path="block_8wave",
                 down_block_n=block_n,
                 num_oc_splits=splits,
+                k_rotate=k_rotate,
             )
             for block_n in (32, 64, 128)
             for splits in (1, 2, 4, 8)
+            for k_rotate in (False, True)
         )
         return [config.to_string() for config in configs]
     if architecture == "gfx942":
@@ -505,7 +529,17 @@ def _run_blockscale_prefill(
             hidden_states, quant_dtype=w1.dtype, transpose_scale=True
         )
         mid = _gateup_output(hidden_states, problem)
-        fp8_blockscale_stage1(gate_input, w1, gate_scale, w1_scale, si, se, valid, mid)
+        fp8_blockscale_stage1(
+            gate_input,
+            w1,
+            gate_scale,
+            w1_scale,
+            si,
+            se,
+            valid,
+            mid,
+            k_rotate=config.k_rotate,
+        )
         # transpose_scale=True already writes K-major scale bytes. Do not transpose again.
         down_input, down_scale = quantize(
             mid,
