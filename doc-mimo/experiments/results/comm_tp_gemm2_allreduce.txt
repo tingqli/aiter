@@ -1,0 +1,49 @@
+# TP8 gemm2 + all-reduce (kernels/test_a8w4_gemm2_tp.py, comm/twoshot_bench.py), 8x MI300X
+# shape: model_dim 4096, inter_dim 256 per rank (TP8), E 256, topk 8, uniform routing.
+# TP-test columns: slowest-rank profiler kernel time (us); err = checkAllclose mismatch
+# ratio vs fp32 reference (before and after timing).
+
+## 1. First TP test, RCCL only (tile 64,128,dyn_rows)
+512 tok: a8w4_gemm2 138.1 us (one-rank outlier, see 2), allreduce 54.3 us, gemm2+allreduce 106.1 us
+   per-rank re-run (scripts/tp_dbg.py): gemm2 56.5-58.7, ar 51.7-53.4, both 105.5-106.0 on every rank
+
+## 2. TP test, RCCL (tile 64,128,1 and 32,128,1)
+tok  tile  gemm2   rccl_ar  gemm2+rccl
+128   64    44.2    26.6     66.3
+128   32    41.4    26.2     64.7
+512   64    56.8    53.5    106.5
+512   32    53.1    53.5    105.7
+2048  64   131.5   149.0    259.3
+2048  32   125.7   148.6    253.3
+
+## 3. Two-shot all-reduce, evolution (TP test, tile 32,128,1)
+# v0: first version (release fences, table loads between remote stores)
+512  gemm2=52.8  rccl=65.9  twoshot=88.8 (err 0, cos 1.4e-6)  gemm2+rccl=161.5  gemm2+twoshot=151.7
+# v1: peer table loaded up front (remote stores no longer vmcnt(0)-serialized)
+128  gemm2=42.1  rccl=25.2  twoshot=18.5   gemm2+rccl=63.5   gemm2+twoshot=55.7
+512  gemm2=53.1  rccl=53.5  twoshot=52.0   gemm2+rccl=104.8  gemm2+twoshot=100.4
+2048 gemm2=126.2 rccl=149.3 twoshot=164.6  gemm2+rccl=253.9  gemm2+twoshot=278.8
+
+# twoshot_bench.py (CUDA events, 100 back-to-back calls, 200-epoch check: bad=0 everywhere)
+# v1 + light sync (sc0|sc1 stores + s_waitcnt, monotonic flags) vs fence sync
+tok=  128 (1 MB):  rccl=40.7us   twoshot_light=14.6us  twoshot_fence=17.8us
+tok=  256 (2 MB):  rccl=44.4us   twoshot_light=21.5us  twoshot_fence=31.9us
+tok=  512 (4 MB):  rccl=66.9us   twoshot_light=40.4us  twoshot_fence=53.4us
+tok= 1024 (8 MB):  rccl=100.8us  twoshot_light=91.7us  twoshot_fence=105.4us
+tok= 2048 (16 MB): rccl=263.1us  twoshot_light=239.1us twoshot_fence=571.6us
+# v2 (final): + destination rotated by (rank + workgroup + i)
+tok=  128 (1 MB):  rccl=44.7us   twoshot_light=12.3us
+tok=  256 (2 MB):  rccl=44.9us   twoshot_light=19.6us
+tok=  512 (4 MB):  rccl=66.7us   twoshot_light=30.8us
+tok= 1024 (8 MB):  rccl=100.6us  twoshot_light=60.8us
+tok= 2048 (16 MB): rccl=157.2us  twoshot_light=110.2us
+# stability, 3 more runs (128 / 512):
+rccl=42.2 twoshot=12.4 | rccl=66.7 twoshot=30.4
+rccl=40.7 twoshot=12.3 | rccl=69.8 twoshot=30.6
+rccl=42.4 twoshot=12.4 | rccl=204.1 twoshot=30.5   (RCCL outlier)
+# from doc-mimo after archiving: tok=512 rccl=69.4 twoshot_light=30.4 twoshot_fence=44.6
+
+## 4. Final TP test (tile 32,128,1)
+128  gemm2=41.5us  rccl_ar=25.1us  twoshot_ar=12.1us(err=0)  gemm2+rccl=63.5us  gemm2+twoshot=50.5us
+512  gemm2=53.6us  rccl_ar=53.3us  twoshot_ar=31.0us(err=0)  gemm2+rccl=104.9us gemm2+twoshot=79.6us
+2048 gemm2=126.7us rccl_ar=148.4us twoshot_ar=111.8us(err=0) gemm2+rccl=255.0us gemm2+twoshot=219.3us

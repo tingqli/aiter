@@ -1,0 +1,81 @@
+# Fused single-kernel MoE (kernels/test_a8w4_fmoe.py) vs 2-kernel, scripts/prof2.py
+# python doc-mimo/experiments/scripts/prof2.py "[(tok,routing),...]" "[dict(...),...]"
+# us = run_perftest kernel time of the whole a8w4_fmoe call (sort + quant + kernel);
+# 2kernel = sort + quant + gemm1 + quant + gemm2 (block_m 32). err = max|fused-2kernel|/mean|2kernel|.
+
+## Scatter-stage double buffering (region1/region0 alternate, 1 barrier per slice)
+## {} = old default n2_per_wave=32 (stage does not fit region0 -> no double buffer)
+RES 128 uniform {}                                           fused=144.7 2kernel=139.9
+RES 128 uniform {'n2_per_wave': 16}                          fused=139.2 2kernel=139.9
+RES 128 uniform {'n2_per_wave': 16, 'a2_in_regs': False}     fused=141.0 2kernel=139.9
+RES 128 uniform {'block_m': 16, 'num_waves': 8}              fused=134.3 2kernel=139.9
+RES 512 uniform {}                                           fused=159.1 2kernel=156.4
+RES 512 uniform {'n2_per_wave': 16}                          fused=153.9 2kernel=156.4
+RES 512 uniform {'n2_per_wave': 16, 'a2_in_regs': False}     fused=157.7 2kernel=156.4
+RES 512 uniform {'block_m': 16, 'num_waves': 8}              fused=214.5 2kernel=156.4
+RES 512 hot     {}                                           fused=220.4 2kernel=178.4
+RES 512 hot     {'n2_per_wave': 16}                          fused=216.7 2kernel=178.4
+RES 512 hot     {'n2_per_wave': 16, 'a2_in_regs': False}     fused=219.7 2kernel=178.4
+RES 512 hot     {'block_m': 16, 'num_waves': 8}              fused=219.4 2kernel=178.4
+RES 2048 uniform {}                                          fused=366.5 2kernel=323.5
+RES 2048 uniform {'n2_per_wave': 16}                         fused=358.9 2kernel=323.5
+RES 2048 uniform {'n2_per_wave': 16, 'a2_in_regs': False}    fused=358.1 2kernel=323.5
+RES 2048 uniform {'block_m': 16, 'num_waves': 8}             fused=434.9 2kernel=323.5
+# new default (n2_per_wave=None -> 16 at bm>=32, 32 at bm16)
+RES 128 uniform {}                                           fused=138.9 2kernel=139.4
+RES 128 uniform {'block_m': 16, 'num_waves': 8}              fused=135.5 2kernel=139.4
+RES 128 uniform {'block_m': 16, 'num_waves': 8, 'n2_per_wave': 32} fused=133.5 2kernel=139.4
+RES 512 uniform {}                                           fused=156.6 2kernel=156.4
+RES 512 uniform {'block_m': 16, 'num_waves': 8}              fused=218.5 2kernel=156.4
+RES 512 uniform {'block_m': 16, 'num_waves': 8, 'n2_per_wave': 32} fused=213.9 2kernel=156.4
+
+## 4 / 8 waves per CTA (bm32), VGPR from results/isa/isa_summary.txt
+RES 128 uniform {}                                           fused=139.9 2kernel=133.3
+RES 128 uniform {'num_waves': 4, 'n2_per_wave': 64}          fused=164.5 2kernel=133.3
+RES 128 uniform {'num_waves': 4, 'n2_per_wave': 32}          fused=173.5 2kernel=133.3
+RES 128 uniform {'num_waves': 8, 'n2_per_wave': 32}          fused=144.7 2kernel=133.3
+RES 512 uniform {}                                           fused=156.4 2kernel=155.5
+RES 512 uniform {'num_waves': 4, 'n2_per_wave': 64}          fused=185.8 2kernel=155.5
+RES 512 uniform {'num_waves': 4, 'n2_per_wave': 32}          fused=201.9 2kernel=155.5
+RES 512 uniform {'num_waves': 8, 'n2_per_wave': 32}          fused=164.5 2kernel=155.5
+RES 512 hot     {}                                           fused=217.7 2kernel=179.0
+RES 512 hot     {'num_waves': 4, 'n2_per_wave': 64}          fused=269.4 2kernel=179.0
+RES 512 hot     {'num_waves': 4, 'n2_per_wave': 32}          fused=291.5 2kernel=179.0
+RES 512 hot     {'num_waves': 8, 'n2_per_wave': 32}          fused=229.6 2kernel=179.0
+RES 2048 uniform {}                                          fused=356.0 2kernel=320.4
+RES 2048 uniform {'num_waves': 4, 'n2_per_wave': 64}         fused=451.3 2kernel=320.4
+RES 2048 uniform {'num_waves': 4, 'n2_per_wave': 32}         fused=490.0 2kernel=320.4
+RES 2048 uniform {'num_waves': 8, 'n2_per_wave': 32}         fused=378.0 2kernel=320.4
+# forced occupancy (2 CTA/CU) -> spills (nw4 w2: 256 VGPR + 40 spill; nw8 w4: 128 + 50)
+RES 128 uniform {'num_waves': 4, 'n2_per_wave': 64, 'waves_per_eu': 2} fused=262.5 2kernel=134.1
+RES 128 uniform {'num_waves': 8, 'n2_per_wave': 32, 'waves_per_eu': 4} fused=272.6 2kernel=134.1
+RES 512 uniform {'num_waves': 4, 'n2_per_wave': 64, 'waves_per_eu': 2} fused=288.1 2kernel=154.3
+RES 512 uniform {'num_waves': 8, 'n2_per_wave': 32, 'waves_per_eu': 4} fused=292.3 2kernel=154.3
+RES 512 hot     {'num_waves': 4, 'n2_per_wave': 64, 'waves_per_eu': 2} fused=339.2 2kernel=179.8
+RES 512 hot     {'num_waves': 8, 'n2_per_wave': 32, 'waves_per_eu': 4} fused=365.0 2kernel=179.8
+RES 2048 uniform {'num_waves': 4, 'n2_per_wave': 64, 'waves_per_eu': 2} fused=596.4 2kernel=321.6
+RES 2048 uniform {'num_waves': 8, 'n2_per_wave': 32, 'waves_per_eu': 4} fused=608.3 2kernel=321.6
+
+## TILE_K1=128 (2 CTA/CU without spills; feature reverted afterwards, so these
+## configs -- and scripts/chk_tk.py -- no longer run against the archived kernel)
+RES 128 uniform {}                                                   fused=138.6 2kernel=144.0 err=0.074
+RES 128 uniform {'num_waves': 4, 'n2_per_wave': 64, 'tile_k1': 128}  fused=165.3 2kernel=144.0 err=0.074
+RES 128 uniform {'num_waves': 4, 'n2_per_wave': 32, 'tile_k1': 128}  fused=175.6 2kernel=144.0 err=0.074
+RES 128 uniform {'num_waves': 8, 'n2_per_wave': 32, 'tile_k1': 128}  fused=153.6 2kernel=144.0 err=0.074
+RES 512 uniform {}                                                   fused=156.2 2kernel=155.9 err=0.0744
+RES 512 uniform {'num_waves': 4, 'n2_per_wave': 64, 'tile_k1': 128}  fused=189.3 2kernel=155.9 err=0.0744
+RES 512 uniform {'num_waves': 4, 'n2_per_wave': 32, 'tile_k1': 128}  fused=202.6 2kernel=155.9 err=0.0744
+RES 512 uniform {'num_waves': 8, 'n2_per_wave': 32, 'tile_k1': 128}  fused=169.8 2kernel=155.9 err=0.0744
+RES 512 hot     {}                                                   fused=215.7 2kernel=178.3 err=0.135
+RES 512 hot     {'num_waves': 4, 'n2_per_wave': 64, 'tile_k1': 128}  fused=228.6 2kernel=178.3 err=0.135
+RES 512 hot     {'num_waves': 4, 'n2_per_wave': 32, 'tile_k1': 128}  fused=236.2 2kernel=178.3 err=0.135
+RES 512 hot     {'num_waves': 8, 'n2_per_wave': 32, 'tile_k1': 128}  fused=209.2 2kernel=178.3 err=0.135
+RES 2048 uniform {}                                                  fused=352.3 2kernel=329.0 err=0.0743
+RES 2048 uniform {'num_waves': 4, 'n2_per_wave': 64, 'tile_k1': 128} fused=397.0 2kernel=329.0 err=0.111
+RES 2048 uniform {'num_waves': 4, 'n2_per_wave': 32, 'tile_k1': 128} fused=427.7 2kernel=329.0 err=0.0743
+RES 2048 uniform {'num_waves': 8, 'n2_per_wave': 32, 'tile_k1': 128} fused=359.3 2kernel=329.0 err=0.0743
+# chk_tk.py (2048 tok, 4 repeats, max/mean|diff| vs default fused / #elems > 5% of mean):
+{}                                                  ['0.148/2.03e-03/80', '0.0741/2.12e-03/69', '0.0741/2.23e-03/67', '0.148/2.22e-03/72']
+{'num_waves': 4, 'n2_per_wave': 64, 'tile_k1': 128} ['0.148/2.88e-03/116', '0.148/2.88e-03/131', '0.148/2.91e-03/134', '0.148/2.85e-03/112']
+{'num_waves': 8, 'n2_per_wave': 32, 'tile_k1': 128} ['0.148/2.90e-03/112', '0.111/2.82e-03/103', '0.148/2.82e-03/120', '0.148/2.80e-03/126']
+-> differences are at the run-to-run level of the default kernel (bf16 atomic order).

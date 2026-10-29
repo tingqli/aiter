@@ -1,0 +1,28 @@
+; a8w4_gemm1_h4096_i256_ne256_bm32_tn128_tk256_bcm1_xcd0_ftz
+hitcounts [('24', 1288), ('360', 740), ('44', 21)]
+total lat 3562752
+v_                 lat=  1208956 ( 33.9%) stall=  201352 per_iter=   3358
+s_waitcnt vmcnt    lat=  1105048 ( 31.0%) stall= 1105048 per_iter=   3070
+buffer_load        lat=   777240 ( 21.8%) stall=  756272 per_iter=   2159
+s_barrier          lat=   176400 (  5.0%) stall=  176400 per_iter=    490
+v_mfma             lat=   121836 (  3.4%) stall=   23432 per_iter=    338
+ds_read            lat=    47944 (  1.3%) stall=   35656 per_iter=    133
+s_waitcnt lgkmcnt  lat=    46816 (  1.3%) stall=   46816 per_iter=    130
+s_                 lat=    31880 (  0.9%) stall=    2488 per_iter=     89
+s_nop              lat=    21920 (  0.6%) stall=   21920 per_iter=     61
+ds_write           lat=    17372 (  0.5%) stall=    1108 per_iter=     48
+global_load        lat=     3812 (  0.1%) stall=    2408 per_iter=     11
+buffer_store       lat=     3528 (  0.1%) stall=    1788 per_iter=     10
+6980 360 464352 464352 s_waitcnt vmcnt(2)
+7012 360 274192 274192 s_waitcnt vmcnt(0)
+6944 24 196732 196732 s_waitcnt vmcnt(1)
+7204 360 176012 174572 buffer_load_dwordx4 v[4:7], v7, s[20:23], 0 offen offset:1024 sc0
+7120 360 171900 171900 s_barrier
+7168 360 161868 160144 buffer_load_dwordx4 v[0:3], v5, s[20:23], 0 offen offset:1024 sc0
+7228 360 116136 114696 buffer_load_dwordx4 v[16:19], v16, s[20:23], 0 offen offset:1024 sc0
+7216 360 93764 92324 buffer_load_dwordx4 v[24:27], v16, s[20:23], 0 offen sc0
+7124 360 82344 80856 buffer_load_dwordx4 v[216:219], v0, s[28:31], 0 offen nt
+12232 24 43164 43164 s_waitcnt vmcnt(1)
+11692 360 31836 31836 s_waitcnt vmcnt(8)
+6552 24 30932 30828 buffer_load_dword v130, v34, s[44:47], 0 offen
+full waves 24 dur min/avg/max 127628 151689 170744

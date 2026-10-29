@@ -1,0 +1,13 @@
+# comm/peer_atomic_probe.py  (2026-10-28, 8x MI300X)
+# torchrun --nproc_per_node=8 doc-mimo/comm/peer_atomic_probe.py
+# Every rank adds (rank+1) as bf16x2 atomics to every element of a 4 MB buffer on
+# 1 (own) or 8 (own + 7 peers via HIP IPC) ranks, ITERS=4 -> expect 4 / 4*36=144.
+
+scope=agent  dests=1  expect=   4 min/max=4/4 (rank0) mismatches/rank=[0, 0, 0, 0, 0, 0, 0, 0]       6.4 us/launch  local  659.5 GB/s  remote total    0.0 GB/s
+scope=agent  dests=8  expect= 144 min/max=144/144 (rank0) mismatches/rank=[0, 0, 0, 0, 0, 0, 0, 0]     278.9 us/launch  local   15.0 GB/s  remote total  105.3 GB/s
+scope=system dests=1  expect=   4 min/max=4/4 (rank0) mismatches/rank=[0, 0, 0, 0, 0, 0, 0, 0]      21.2 us/launch  local  198.1 GB/s  remote total    0.0 GB/s
+scope=system dests=8  expect= 144 min/max=144/144 (rank0) mismatches/rank=[0, 0, 0, 0, 0, 0, 0, 0]    2045.4 us/launch  local    2.1 GB/s  remote total   14.4 GB/s
+
+# Conclusion: cross-GPU atomics are correct (with kernel boundary + host sync between
+# phases) but only ~105 GB/s per rank (agent scope). gemm2 scatters per routed row:
+# remote payload = topk*(npes-1)*out bytes = 224 MB/rank at 512 tok -> ~2.1 ms. Dropped.
