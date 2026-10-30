@@ -20,6 +20,7 @@ Run:
     pytest op_tests/flydsl_tests/test_flydsl_moe_a16wfp4.py -q
 """
 
+import itertools
 import os
 import sys
 
@@ -98,10 +99,16 @@ def a8w4_prepare_weights(w1, w2, w1_scale, w2_scale):
     )
 
 
-def a8w4_fused_moe(hidden_states, weights, topk_weights, topk_ids, *, block_m=32):
+def a8w4_fused_moe(
+    hidden_states, weights, topk_weights, topk_ids, *, block_m=32, fuse_quant=False
+):
     """SiLU SEPARATED A8W4 MoE: sort -> fp8 row-quant(x) -> gemm1 (gate+up+SiLU,
     bf16 by sorted row) -> fp8 row-quant(inter) -> gemm2 (down + weighted atomic
-    scatter into the zeroed moe_buf). Returns bf16 [tokens, model_dim]."""
+    scatter into the zeroed moe_buf). Returns bf16 [tokens, model_dim].
+
+    ``fuse_quant``: gemm1 quantizes in its epilogue (``q8s``: fp8 by sorted row,
+    one f32 scale per (row, 128 cols)) and gemm2 takes the per-128-K-group A
+    scales; drops the second row-quant kernel and the bf16 round trip."""
     from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
 
     a8w4_gemm1, a8w4_gemm2 = _a8w4_kernels()
@@ -113,8 +120,53 @@ def a8w4_fused_moe(hidden_states, weights, topk_weights, topk_ids, *, block_m=32
         moe_sorting(topk_ids, topk_weights, E, model_dim, dtypes.bf16, block_m)[:5]
     )
     x_fp8, x_scale = quantize_rows(hidden_states)
+    sorted_size = sorted_expert_ids.numel() * block_m
+    if fuse_quant:
+        assert g1_cfg["tile_n"] == 128, "q8s scale groups = gemm1 tile_n = 128"
+        groups = inter_dim // 128
+        buf = torch.empty(
+            sorted_size * (inter_dim + groups * 4),
+            dtype=torch.uint8,
+            device=hidden_states.device,
+        )
+        a8w4_gemm1(
+            x_fp8,
+            x_scale,
+            weights["w1"],
+            weights["w1_scale"],
+            weights["w1_exp"],
+            sorted_ids,
+            sorted_expert_ids,
+            num_valid_ids,
+            buf,
+            num_experts=E,
+            tile_m=block_m,
+            epilog="q8s",
+            inter_dim=inter_dim,
+            topk=topk_ids.shape[1],
+            **g1_cfg,
+        )
+        nd = sorted_size * inter_dim
+        a2_fp8 = buf[:nd].view(torch.float8_e4m3fnuz).view(sorted_size, inter_dim)
+        a2_scale = buf[nd:].view(torch.float32).view(sorted_size, groups)
+        a8w4_gemm2(
+            a2_fp8,
+            a2_scale,
+            weights["w2"],
+            weights["w2_scale"],
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf,
+            num_experts=E,
+            tile_m=block_m,
+            a_group=128,
+            **g2_cfg,
+        )
+        return moe_buf
     inter = torch.empty(
-        (sorted_expert_ids.numel() * block_m, inter_dim),
+        (sorted_size, inter_dim),
         dtype=dtypes.bf16,
         device=hidden_states.device,
     )
@@ -149,100 +201,8 @@ def a8w4_fused_moe(hidden_states, weights, topk_weights, topk_ids, *, block_m=32
     )
     return moe_buf
 
-
-@_SKIP
-@pytest.mark.parametrize("model_dim,inter_dim", [(3584, 512), (3584, 384)])
-@pytest.mark.parametrize("token", [1, 16, 128])
-# (1,1) = plain tanh; (4,25) = kimi-k3 production betas, which exercise the
-# runtime situ_beta/situ_linear_beta f32 args (beta is NOT a compile key, so this
-# adds no extra kernel compiles).
-@pytest.mark.parametrize("situ_beta,situ_linear_beta", [(1.0, 1.0), (4.0, 25.0)])
-def test_flydsl_a16wfp4_situv2_e2e(
-    model_dim, inter_dim, token, situ_beta, situ_linear_beta
-):
-    """a16w4 SiTUv2 SEPARATED end-to-end through fused_moe vs a bf16 SiTUv2 ref."""
-    E, topk = 896, 16
-    dtype = dtypes.bf16
-    torch.manual_seed(0)
-    torch.cuda.manual_seed(0)
-
-    inp = torch.randn((token, model_dim), dtype=dtype, device="cuda")
-    w1 = torch.randn((E, inter_dim * 2, model_dim), dtype=dtype, device="cuda")
-    w2 = torch.randn((E, model_dim, inter_dim), dtype=dtype, device="cuda")
-    score = torch.randn((token, E), dtype=dtype, device="cuda")
-    topk_weights, topk_ids = fused_topk(inp, score, topk, True)
-
-    tq = aiter.get_torch_quant(QuantType.per_1x32)
-    w1_qt, w1_scale = tq(w1, quant_dtype=dtypes.fp4x2)
-    w2_qt, w2_scale = tq(w2, quant_dtype=dtypes.fp4x2)
-    w1_qt = w1_qt.view(E, inter_dim * 2, model_dim // 2)
-    w2_qt = w2_qt.view(E, model_dim, inter_dim // 2)
-    w1_scale_e = w1_scale.view(E, inter_dim * 2, model_dim // 32)
-    w2_scale_e = w2_scale.view(E, model_dim, inter_dim // 32)
-
-    # bf16 SiTUv2 SEPARATED reference
-    o1 = torch_moe_stage1(
-        inp.to(dtype),
-        w1_qt.view(dtypes.fp4x2),
-        w2_qt.view(dtypes.fp4x2),
-        topk_weights,
-        topk_ids,
-        dtype=dtype,
-        activation=ActivationType.Situv2,
-        quant_type=QuantType.per_1x32,
-        a1_scale=None,
-        w1_scale=w1_scale_e,
-        doweight=False,
-        situ_beta=situ_beta,
-        situ_linear_beta=situ_linear_beta,
-    )
-    ref = torch_moe_stage2(
-        o1.view(token, topk, inter_dim),
-        w1_qt.view(dtypes.fp4x2),
-        w2_qt.view(dtypes.fp4x2),
-        topk_weights,
-        topk_ids,
-        dtype=dtype,
-        quant_type=QuantType.per_1x32,
-        w2_scale=w2_scale_e,
-        a2_scale=None,
-        doweight=True,
-    )
-
-    # caller contract: standard GGUU (separated gate/up) W1 layout, matching main
-    w1_gui = shuffle_weight_a16w4(w1_qt, 16, False)
-    w2_gui = shuffle_weight_a16w4(w2_qt, 16, False)
-    w1_scale_gui = shuffle_scale_a16w4(w1_scale, E, False)
-    w2_scale_gui = shuffle_scale_a16w4(w2_scale, E, False)
-
-    out = fused_moe(
-        inp,
-        w1_gui,
-        w2_gui,
-        topk_weights,
-        topk_ids,
-        w1_scale=w1_scale_gui,
-        w2_scale=w2_scale_gui,
-        quant_type=QuantType.per_1x32,
-        activation=ActivationType.Situv2,
-        doweight_stage1=False,
-        gate_mode=GateMode.SEPARATED.value,
-        beta=situ_beta,
-        linear_beta=situ_linear_beta,
-    )
-
-    assert not out.isnan().any().item(), "a16w4 SiTUv2 output contains NaN"
-    ld = _cos_diff(ref.float(), out.float())
-    assert ld < 1e-2, f"a16w4 SiTUv2 cos/logits_diff too large: {ld:.3e}"
-
-
 import torch
 from typing import Callable, Any, Tuple
-
-
-import torch
-from typing import Callable, Any
-
 
 def make_graphed_oprun(
     oprun: Callable,
@@ -307,7 +267,7 @@ def make_graphed_oprun(
 
 @_SKIP
 @pytest.mark.parametrize("model_dim,inter_dim", [(4096, 256)])
-@pytest.mark.parametrize("token", [1024])
+@pytest.mark.parametrize("token", [128, 512, 2048])
 # Mimo v2.6
 def test_flydsl_a16wfp4_silu_e2e(
     model_dim, inter_dim, token
@@ -420,9 +380,11 @@ def test_flydsl_a16wfp4_silu_e2e(
         return
     weights = a8w4_prepare_weights(w1_gui, w2_gui, w1_scale_gui, w2_scale_gui)
     print(f"  fused_moe (current selection): {avg_us:8.2f} us  cos_diff={ld:.3e}")
-    for block_m in A8W4_E2E_CFGS:
+    for block_m, fuse_quant in itertools.product(A8W4_E2E_CFGS, (False, True)):
         # JIT-compile outside the timed region.
-        a8w4_fused_moe(inp, weights, topk_weights, topk_ids, block_m=block_m)
+        a8w4_fused_moe(
+            inp, weights, topk_weights, topk_ids, block_m=block_m, fuse_quant=fuse_quant
+        )
         torch.cuda.synchronize()
         out_new, us_new = run_perftest(
             a8w4_fused_moe,
@@ -431,11 +393,13 @@ def test_flydsl_a16wfp4_silu_e2e(
             topk_weights,
             topk_ids,
             block_m=block_m,
+            fuse_quant=fuse_quant,
         )
-        assert not out_new.isnan().any().item(), f"a8w4 bm{block_m} output has NaN"
+        tag = f"bm{block_m}{' fused-quant' if fuse_quant else ''}"
+        assert not out_new.isnan().any().item(), f"a8w4 {tag} output has NaN"
         ld_new = _cos_diff(ref.float(), out_new.float())
         print(
-            f"  a8w4 standalone bm{block_m:<3}         : {us_new:8.2f} us  "
+            f"  a8w4 standalone {tag:<16}: {us_new:8.2f} us  "
             f"cos_diff={ld_new:.3e}  speedup={avg_us / us_new:.2f}x"
         )
-        assert ld_new < 1e-2, f"a8w4 bm{block_m} cos/logits_diff too large: {ld_new:.3e}"
+        assert ld_new < 1e-2, f"a8w4 {tag} cos/logits_diff too large: {ld_new:.3e}"

@@ -9,7 +9,7 @@ import os, sys, torch, torch.distributed as dist
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kernels")
 )
-import test_a8w4_gemm2_tp as m
+import twoshot_allreduce as m
 lr = int(os.environ["LOCAL_RANK"]); torch.cuda.set_device(lr)
 dist.init_process_group("nccl", device_id=torch.device("cuda", lr))
 x = torch.randn(512, 4096, dtype=torch.bfloat16, device="cuda")

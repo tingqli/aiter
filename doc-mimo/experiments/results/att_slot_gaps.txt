@@ -1,0 +1,14 @@
+### ck_test/ui_output_agent_56655_dispatch_3909
+clock 1627 cyc/us, 96 slots, gemm phase ends at SE0 43.4, SE1 41.6, SE2 40.0, SE3 40.2 us
+slot time during the gemm phase (between first and last wave of each slot): busy 3204 us, idle gaps 137 us -> 4.1% idle
+gap between consecutive waves on a slot (us):
+  gemm  -> gemm  n= 316  min 0.02  p25 0.06  med 0.20  p75 0.47  p90 0.84  max 1.64  sum 100
+  empty -> empty n= 182  min 0.02  p25 0.06  med 0.11  p75 0.19  p90 0.29  max 1.05  sum 27
+  gemm  -> empty n=  46  min 0.02  p25 0.06  med 0.12  p75 0.33  p90 0.57  max 0.94  sum 10
+
+occupancy.json events per SE: SE0 2928, SE1 3248, SE2 3248, SE3 2928, SEdispatches 2, SEversion 5
+### ck_test/ui_output_agent_52389_dispatch_3909
+Traceback (most recent call last):
+  File "/sgl-workspace/aiter/doc-mimo/experiments/scripts/att_slot_gaps.py", line 17, in <module>
+    fn = json.load(open(os.path.join(D, "filenames.json")))["wave_filenames"]
+FileNotFoundError: [Errno 2] No such file or directory: 'ck_test/ui_output_agent_52389_dispatch_3909/filenames.json'

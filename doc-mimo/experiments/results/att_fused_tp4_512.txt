@@ -1,0 +1,51 @@
+clock 1703 cyc/us; traced span 55.4 us; waves 632
+
+[comm] 8 waves  lifetime us: min 45.14 med 51.50 max 53.88  (dispatch->first issue med 0.30)
+    0 prologue                                      0.78 us/wave    1.6%
+    9 comm                                         48.02 us/wave   98.4%
+
+[empty] 204 waves  lifetime us: min 0.13 med 0.14 max 0.62  (dispatch->first issue med 0.02)
+    0 prologue                                      0.18 us/wave  100.0%
+
+[gemm] 420 waves  lifetime us: min 4.72 med 6.87 max 14.28  (dispatch->first issue med 0.02)
+    0 prologue                                      0.54 us/wave    7.4%
+    1 load+mfma+scale (to C-tile in LDS)            5.34 us/wave   73.3%
+    5 epilogue atomics                              0.86 us/wave   11.8%
+    6 tile hook (vmcnt0+barrier+cnt atomic)         0.55 us/wave    7.5%
+
+resident waves per traced CU (avg over the 4 SEs), 20 bins over the span:
+  gemm  13.4 22.0 21.6 18.7 18.7 19.8 19.4 20.0 18.5 19.1 20.0 19.7 19.1 15.8  9.2  2.1  0.1  0.0  0.0  0.0
+  comm   1.1  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  2.0  1.8  1.2  1.0  0.4
+  empty  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.1  2.7  0.8  0.0  0.0  0.0  0.0  0.0
+  bin us    3    6    8   11   14   17   19   22   25   28   30   33   36   39   42   44   47   50   53   55
+  SE0: gemm waves  96 last end   43.2 us | comm waves 4 begin   1.5 end   55.4 us
+  SE1: gemm waves  92 last end   45.8 us | comm waves 4 begin   0.9 end   48.9 us
+  SE2: gemm waves 116 last end   42.8 us
+  SE3: gemm waves 116 last end   41.6 us
+
+top stalls (code.json, summed over traced waves):
+    171 1 load+mfma+scale (to  hits  420 stall/hit      775 cyc  s_waitcnt vmcnt(0)
+   1219 5 epilogue atomics     hits  420 stall/hit      581 cyc  s_waitcnt vmcnt(0)
+   1577 9 comm                 hits   32 stall/hit     7244 cyc  s_barrier
+    676 1 load+mfma+scale (to  hits  220 stall/hit      784 cyc  s_waitcnt vmcnt(5)
+   1242 6 tile hook (vmcnt0+ba hits  420 stall/hit      410 cyc  s_barrier
+    252 1 load+mfma+scale (to  hits  200 stall/hit      853 cyc  s_waitcnt vmcnt(4)
+   1197 5 epilogue atomics     hits  220 stall/hit      751 cyc  s_waitcnt vmcnt(1)
+    542 1 load+mfma+scale (to  hits  200 stall/hit      625 cyc  s_waitcnt vmcnt(3)
+    126 1 load+mfma+scale (to  hits  420 stall/hit      292 cyc  buffer_load_dword v3, v3, s[20:23], 0 offen
+   1241 6 tile hook (vmcnt0+ba hits  420 stall/hit      270 cyc  s_waitcnt vmcnt(0)
+   1016 1 load+mfma+scale (to  hits  220 stall/hit      486 cyc  s_waitcnt vmcnt(13)
+    258 1 load+mfma+scale (to  hits  200 stall/hit      454 cyc  s_barrier
+      9 0 prologue             hits  632 stall/hit      143 cyc  v_readfirstlane_b32 s0, v0
+    692 1 load+mfma+scale (to  hits  220 stall/hit      372 cyc  s_barrier
+   1772 9 comm                 hits   32 stall/hit     1866 cyc  s_waitcnt vmcnt(0)
+   1609 9 comm                 hits   32 stall/hit     1755 cyc  s_waitcnt vmcnt(0)
+   1286 6 tile hook (vmcnt0+ba hits  105 stall/hit      532 cyc  s_waitcnt vmcnt(0)
+   1647 9 comm                 hits   32 stall/hit     1596 cyc  s_barrier
+     35 1 load+mfma+scale (to  hits  420 stall/hit      118 cyc  v_cvt_f32_u32_e32 v2, s4
+   1542 9 comm                 hits   34 stall/hit     1228 cyc  s_waitcnt vmcnt(0)
+      6 0 prologue             hits  632 stall/hit       65 cyc  s_waitcnt lgkmcnt(0)
+    161 1 load+mfma+scale (to  hits  420 stall/hit       79 cyc  s_waitcnt lgkmcnt(0)
+     10 0 prologue             hits  632 stall/hit       52 cyc  s_waitcnt lgkmcnt(0)
+      1 0 prologue             hits  632 stall/hit       51 cyc  s_load_dwordx16 s[12:27], s[0:1], 0x0
+    681 1 load+mfma+scale (to  hits  220 stall/hit      131 cyc  s_waitcnt vmcnt(4)

@@ -1,0 +1,2 @@
+    gemm2(m)=65.9  twoshot=31.9  gemm2(m)+twoshot=103.0  fused c128 v1 ch256 route8=98.7  fused c128 v1 route8=97.1  fused c192 v1 ch256 route8=99.2  fused c192 v1 route8=99.3  fused c256 v1 ch256 route8=103.0  fused c256 v1 route8=102.5
+    gemm2(m)=159.4  twoshot=115.1  gemm2(m)+twoshot=281.2  fused c128 v1 ch256 route8=245.1  fused c128 v1 route8=262.8  fused c192 v1 ch256 route8=256.4  fused c192 v1 route8=282.5  fused c256 v1 ch256 route8=259.2  fused c256 v1 route8=284.9

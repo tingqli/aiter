@@ -1,0 +1,88 @@
+tok=  128  side AR bad=0  fused o=m c32 bad=0  sep c32 bad=0  fused o=g c32 bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0  fused o=m c128 bad=0  sep c128 bad=0  fused o=g c128 bad=0
+    gemm2(m)                    52.4 us
+    gemm2(g)                    54.8 us
+    AR                          13.1 us
+    seq                         67.5 us   AR hidden   -15%
+    side g->AR                  71.9 us   AR hidden   -49%
+    side AR->g                  75.1 us   AR hidden   -73%
+    fused idle o=m c32          54.4 us
+    fused nodep o=m c32         61.0 us   AR hidden    35%
+    commWG c32 alone            13.2 us
+    sep nodep c32               71.7 us   AR hidden   -47%
+    fused nodep o=g c32         61.6 us   AR hidden    30%
+    fused idle o=m c64          53.7 us
+    fused nodep o=m c64         62.9 us   AR hidden    20%
+    commWG c64 alone            12.6 us
+    sep nodep c64               71.7 us   AR hidden   -47%
+    fused nodep o=g c64         61.5 us   AR hidden    31%
+    fused idle o=m c128         54.3 us
+    fused nodep o=m c128        63.2 us   AR hidden    18%
+    commWG c128 alone           14.8 us
+    sep nodep c128             283.4 us   AR hidden -1657%
+    fused nodep o=g c128        64.1 us   AR hidden    11%
+tok=  512  side AR bad=0  fused o=m c32 bad=0  sep c32 bad=0  fused o=g c32 bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0  fused o=m c128 bad=0  sep c128 bad=0  fused o=g c128 bad=0
+    gemm2(m)                    70.0 us
+    gemm2(g)                    67.7 us
+    AR                          32.3 us
+    seq                        101.1 us   AR hidden     4%
+    side g->AR                 104.8 us   AR hidden    -8%
+    side AR->g                 105.2 us   AR hidden    -9%
+    fused idle o=m c32          69.5 us
+    fused nodep o=m c32         84.6 us   AR hidden    55%
+    commWG c32 alone            37.8 us
+    sep nodep c32              307.6 us   AR hidden  -636%
+    fused nodep o=g c32         84.6 us   AR hidden    55%
+    fused idle o=m c64          68.5 us
+    fused nodep o=m c64         93.1 us   AR hidden    28%
+    commWG c64 alone            32.0 us
+    sep nodep c64              100.6 us   AR hidden     5%
+    fused nodep o=g c64         93.4 us   AR hidden    28%
+    fused idle o=m c128         68.4 us
+    fused nodep o=m c128        91.7 us   AR hidden    33%
+    commWG c128 alone           31.8 us
+    sep nodep c128             102.6 us   AR hidden    -1%
+    fused nodep o=g c128        94.2 us   AR hidden    25%
+tok= 1024  side AR bad=0  fused o=m c32 bad=0  sep c32 bad=0  fused o=g c32 bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0  fused o=m c128 bad=0  sep c128 bad=0  fused o=g c128 bad=0
+    gemm2(m)                    98.6 us
+    gemm2(g)                   103.7 us
+    AR                          60.1 us
+    seq                        162.0 us   AR hidden    -5%
+    side g->AR                 159.0 us   AR hidden    -0%
+    side AR->g                 158.1 us   AR hidden     1%
+    fused idle o=m c32         102.9 us
+    fused nodep o=m c32        130.7 us   AR hidden    47%
+    commWG c32 alone            71.3 us
+    sep nodep c32              146.2 us   AR hidden    21%
+    fused nodep o=g c32        132.1 us   AR hidden    44%
+    fused idle o=m c64         103.0 us
+    fused nodep o=m c64        137.8 us   AR hidden    35%
+    commWG c64 alone            60.0 us
+    sep nodep c64              510.7 us   AR hidden  -585%
+    fused nodep o=g c64        141.5 us   AR hidden    29%
+    fused idle o=m c128        103.4 us
+    fused nodep o=m c128       151.7 us   AR hidden    12%
+    commWG c128 alone           56.8 us
+    sep nodep c128             162.1 us   AR hidden    -6%
+    fused nodep o=g c128       152.6 us   AR hidden    10%
+tok= 2048  side AR bad=0  fused o=m c32 bad=0  sep c32 bad=0  fused o=g c32 bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0  fused o=m c128 bad=0  sep c128 bad=0  fused o=g c128 bad=0
+    gemm2(m)                   159.2 us
+    gemm2(g)                   166.2 us
+    AR                         113.9 us
+    seq                        270.8 us   AR hidden     2%
+    side g->AR                 272.4 us   AR hidden     1%
+    side AR->g                 272.9 us   AR hidden     0%
+    fused idle o=m c32         168.6 us
+    fused nodep o=m c32        229.0 us   AR hidden    39%
+    commWG c32 alone           134.7 us
+    sep nodep c32              248.0 us   AR hidden    22%
+    fused nodep o=g c32        238.1 us   AR hidden    31%
+    fused idle o=m c64         168.6 us
+    fused nodep o=m c64        199.0 us   AR hidden    65%
+    commWG c64 alone           111.3 us
+    sep nodep c64              219.0 us   AR hidden    48%
+    fused nodep o=g c64        213.8 us   AR hidden    52%
+    fused idle o=m c128        166.6 us
+    fused nodep o=m c128       254.8 us   AR hidden    16%
+    commWG c128 alone          105.6 us
+    sep nodep c128             475.9 us   AR hidden  -178%
+    fused nodep o=g c128       267.0 us   AR hidden     5%

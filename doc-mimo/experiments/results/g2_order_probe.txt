@@ -1,0 +1,15 @@
+TIME rep=0 tok=128: m=44.9(err=2e-06)  nx=47.1(err=2e-06)  g=48.0(err=0e+00)
+TIME rep=0 tok=512: m=59.5(err=0e+00)  nx=61.4(err=5e-07)  g=62.3(err=1e-06)
+TIME rep=0 tok=2048: m=140.7(err=2e-06)  nx=179.3(err=2e-06)  g=146.5(err=1e-06)
+TIME rep=1 tok=128: m=46.2(err=0e+00)  nx=48.5(err=0e+00)  g=50.8(err=0e+00)
+TIME rep=1 tok=512: m=58.9(err=0e+00)  nx=61.4(err=1e-06)  g=60.6(err=1e-06)
+TIME rep=1 tok=2048: m=141.1(err=2e-06)  nx=181.0(err=1e-06)  g=145.6(err=1e-06)
+PROBE tok=128 order=m  span=  49.2us  chunk final at (% of span):  98 100  99  99  99  99  99 100
+PROBE tok=128 order=nx span=  51.6us  chunk final at (% of span):  26  40  51  65  76  87  96 100
+PROBE tok=128 order=g  span=  52.5us  chunk final at (% of span):  27  41  57  67  75  87  97 100
+PROBE tok=512 order=m  span=  57.0us  chunk final at (% of span):  97  99  99  99  99 100 100  99
+PROBE tok=512 order=nx span=  61.4us  chunk final at (% of span):  23  36  50  62  71  85  95 100
+PROBE tok=512 order=g  span=  64.5us  chunk final at (% of span):  23  38  48  60  74  85  95 100
+PROBE tok=2048 order=m  span= 133.4us  chunk final at (% of span):  98  99  99  99  99  98 100  99
+PROBE tok=2048 order=nx span= 185.4us  chunk final at (% of span):  19  30  44  55  68  80  93 100
+PROBE tok=2048 order=g  span= 151.5us  chunk final at (% of span):  17  29  41  54  66  78  90 100

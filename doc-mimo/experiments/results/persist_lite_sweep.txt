@@ -1,0 +1,32 @@
+pytest PERSIST=0: 16 passed, 2 warnings in 18.76s
+pytest PERSIST=4: 16 failed, 2 warnings in 13.51s
+== PERSIST=0 exit=0 bad=0 10:16:09
+    gemm2(m)=51.7  gemm2(g)=54.1  twoshot=12.8  gemm2(m)+twoshot=65.0  ch256=72.4
+    gemm2(m)=66.7  gemm2(g)=67.3  twoshot=31.8  gemm2(m)+twoshot=101.9  ch256=90.8
+    gemm2(m)=98.6  gemm2(g)=99.6  twoshot=61.6  gemm2(m)+twoshot=165.8  ch256=135.1
+    gemm2(m)=159.3  gemm2(g)=163.8  twoshot=115.3  gemm2(m)+twoshot=280.0  ch256=230.2
+== PERSIST=4 exit=1 bad=0 10:18:43
+[rank1]: TypeError: 'Tuple3D' object is not callable
+[rank7]: TypeError: 'Tuple3D' object is not callable
+== PERSIST=5 exit=0 bad=0 10:21:20
+    gemm2(m)=60.1  gemm2(g)=59.6  twoshot=13.2  gemm2(m)+twoshot=73.3  ch256=77.4
+    gemm2(m)=76.6  gemm2(g)=76.1  twoshot=32.2  gemm2(m)+twoshot=112.9  ch256=98.1
+    gemm2(m)=114.1  gemm2(g)=113.0  twoshot=61.5  gemm2(m)+twoshot=179.0  ch256=155.6
+    gemm2(m)=196.4  gemm2(g)=190.2  twoshot=113.6  gemm2(m)+twoshot=314.5  ch256=286.2
+== PERSIST=6 exit=0 bad=0 10:23:58
+    gemm2(m)=56.3  gemm2(g)=57.9  twoshot=13.0  gemm2(m)+twoshot=75.0  ch256=74.1
+    gemm2(m)=73.8  gemm2(g)=75.6  twoshot=32.8  gemm2(m)+twoshot=108.6  ch256=97.4
+    gemm2(m)=109.8  gemm2(g)=113.1  twoshot=59.6  gemm2(m)+twoshot=175.2  ch256=149.5
+    gemm2(m)=188.1  gemm2(g)=184.2  twoshot=115.8  gemm2(m)+twoshot=303.8  ch256=269.5
+== PERSIST=8 exit=0 bad=0 10:26:37
+    gemm2(m)=55.1  gemm2(g)=57.1  twoshot=12.8  gemm2(m)+twoshot=73.8  ch256=77.2
+    gemm2(m)=70.7  gemm2(g)=72.0  twoshot=32.1  gemm2(m)+twoshot=112.0  ch256=95.9
+    gemm2(m)=106.6  gemm2(g)=107.7  twoshot=63.5  gemm2(m)+twoshot=171.1  ch256=148.3
+    gemm2(m)=181.0  gemm2(g)=180.2  twoshot=116.5  gemm2(m)+twoshot=297.9  ch256=256.6
+== PERSIST=0 exit=0 bad=0 10:29:15
+    gemm2(m)=52.3  gemm2(g)=54.6  twoshot=13.0  gemm2(m)+twoshot=71.6  ch256=77.2
+    gemm2(m)=68.5  gemm2(g)=66.7  twoshot=31.4  gemm2(m)+twoshot=102.7  ch256=90.7
+    gemm2(m)=98.0  gemm2(g)=100.0  twoshot=62.0  gemm2(m)+twoshot=164.9  ch256=136.1
+    gemm2(m)=158.5  gemm2(g)=163.5  twoshot=113.8  gemm2(m)+twoshot=280.9  ch256=232.0
+PERSIST=4: 16 passed, 2 warnings in 18.15s
+PERSIST=6: 16 passed, 2 warnings in 18.01s

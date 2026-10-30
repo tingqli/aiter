@@ -1,0 +1,10 @@
+tok=  128  
+    gemm2(m)=52.2  gemm2(g)=55.2  twoshot=13.3  gemm2(m)+twoshot=71.3  fused c32 v1 skip ch256=56.6  fused c32 v1 skip ch1024=54.3  fused c32 v1 ch256=76.1  fused c32 v1 ch1024=68.2  fused c64 v1 skip ch256=56.0  fused c64 v1 skip ch1024=55.0  fused c64 v1 ch256=76.7  fused c64 v1 ch1024=74.4
+tok=  256  
+    gemm2(m)=56.1  gemm2(g)=59.1  twoshot=20.5  gemm2(m)+twoshot=81.6  fused c32 v1 skip ch256=60.2  fused c32 v1 skip ch1024=58.5  fused c32 v1 ch256=78.9  fused c32 v1 ch1024=76.0  fused c64 v1 skip ch256=60.7  fused c64 v1 skip ch1024=59.1  fused c64 v1 ch256=75.7  fused c64 v1 ch1024=77.8
+tok=  512  
+    gemm2(m)=66.1  gemm2(g)=68.1  twoshot=31.8  gemm2(m)+twoshot=102.7  fused c32 v1 skip ch256=72.1  fused c32 v1 skip ch1024=69.2  fused c32 v1 ch256=92.9  fused c32 v1 ch1024=94.8  fused c64 v1 skip ch256=69.9  fused c64 v1 skip ch1024=68.7  fused c64 v1 ch256=90.9  fused c64 v1 ch1024=94.9
+tok= 1024  
+    gemm2(m)=98.8  gemm2(g)=102.2  twoshot=61.0  gemm2(m)+twoshot=165.5  fused c32 v1 skip ch256=106.5  fused c32 v1 skip ch1024=104.6  fused c32 v1 ch256=143.8  fused c32 v1 ch1024=161.7  fused c64 v1 skip ch256=106.7  fused c64 v1 skip ch1024=104.3  fused c64 v1 ch256=134.3  fused c64 v1 ch1024=161.9
+tok= 2048  
+    gemm2(m)=160.1  gemm2(g)=167.1  twoshot=113.4  gemm2(m)+twoshot=282.4  fused c32 v1 skip ch256=177.4  fused c32 v1 skip ch1024=170.1  fused c32 v1 ch256=258.0  fused c32 v1 ch1024=273.5  fused c64 v1 skip ch256=175.5  fused c64 v1 skip ch1024=169.2  fused c64 v1 ch256=239.3  fused c64 v1 ch1024=273.5

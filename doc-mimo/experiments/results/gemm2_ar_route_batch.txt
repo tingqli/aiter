@@ -1,0 +1,9 @@
+ROUTE_BATCH=2 exit=0 0 bad-lines
+    gemm2(m)=66.5  twoshot=31.4  gemm2(m)+twoshot=102.8  fused c64 v1 ch256 route8=96.0  fused c128 v1 ch256 route8=99.8
+    gemm2(m)=161.2  twoshot=114.3  gemm2(m)+twoshot=278.3  fused c64 v1 ch256 route8=243.4  fused c128 v1 ch256 route8=256.5
+ROUTE_BATCH=4 exit=0 0 bad-lines
+    gemm2(m)=66.3  twoshot=31.9  gemm2(m)+twoshot=103.2  fused c64 v1 ch256 route8=97.3  fused c128 v1 ch256 route8=98.3
+    gemm2(m)=159.3  twoshot=114.3  gemm2(m)+twoshot=279.3  fused c64 v1 ch256 route8=241.8  fused c128 v1 ch256 route8=258.4
+ROUTE_BATCH=8 exit=0 0 bad-lines
+    gemm2(m)=67.7  twoshot=31.9  gemm2(m)+twoshot=103.6  fused c64 v1 ch256 route8=97.8  fused c128 v1 ch256 route8=99.4
+    gemm2(m)=160.0  twoshot=114.6  gemm2(m)+twoshot=281.3  fused c64 v1 ch256 route8=241.3  fused c128 v1 ch256 route8=255.7

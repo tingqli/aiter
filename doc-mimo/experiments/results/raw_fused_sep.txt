@@ -1,0 +1,2 @@
+tok=  512  fused c32 v1 sep: bad=0 maxdiff=0.25
+    gemm2(m)=66.4  gemm2(g)=66.2  twoshot=31.0  gemm2(m)+twoshot=103.2  fused c32 v1 sep=112.0

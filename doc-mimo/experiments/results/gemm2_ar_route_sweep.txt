@@ -1,0 +1,4 @@
+    gemm2(m)=52.4  twoshot=14.1  gemm2(m)+twoshot=72.2  fused c64 v1 skip ch256=55.8  fused c64 v1 skip ch256 route8=54.5  fused c64 v1 ch256=75.4  fused c64 v1 ch256 route8=78.6
+    gemm2(m)=68.9  twoshot=31.2  gemm2(m)+twoshot=102.8  fused c64 v1 skip ch256=71.8  fused c64 v1 skip ch256 route8=64.8  fused c64 v1 ch256=92.8  fused c64 v1 ch256 route8=97.3
+    gemm2(m)=99.4  twoshot=61.3  gemm2(m)+twoshot=164.0  fused c64 v1 skip ch256=105.1  fused c64 v1 skip ch256 route8=98.0  fused c64 v1 ch256=136.8  fused c64 v1 ch256 route8=148.6
+    gemm2(m)=160.2  twoshot=115.5  gemm2(m)+twoshot=281.6  fused c64 v1 skip ch256=179.8  fused c64 v1 skip ch256 route8=161.0  fused c64 v1 ch256=237.9  fused c64 v1 ch256 route8=254.3

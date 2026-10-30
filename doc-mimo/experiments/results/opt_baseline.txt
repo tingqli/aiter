@@ -1,0 +1,6 @@
+    sys.exit(main())
+    return f(*args, **kwargs)
+    run(args)
+    elastic_launch(
+    return launch_agent(self._config, self._entrypoint, list(args))
+    raise ChildFailedError(

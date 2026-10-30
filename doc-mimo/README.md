@@ -19,7 +19,7 @@ doc-mimo/
   kernels/                              # 均可直接 pytest / python / torchrun（同目录互相 import）
     test_a8w4_gemm1.py                  # gemm1（gate|up + SiLU）standalone kernel + 正确性/性能
     test_a8w4_gemm2.py                  # gemm2（down + 路由 atomic scatter）standalone kernel + 正确性/性能
-    test_a8w4_gemm2_tp.py               # TP8：gemm2 + RCCL / two-shot all-reduce（含 HIP IPC symmetric buffer）
+    twoshot_allreduce.py               # TP8：gemm2 + RCCL / two-shot all-reduce（含 HIP IPC symmetric buffer）
     test_a8w4_fmoe.py                   # gemm1+gemm2 单 kernel 融合 MoE（对比 2-kernel 与 fused_moe）
     test_flydsl_moe_a16wfp4.py          # 加了 a8w4 2-kernel e2e 对比的 e2e 测试（完整文件）
     test_flydsl_moe_a16wfp4.e2e.patch   # 同上，相对基线的 diff
@@ -48,7 +48,7 @@ AITER_CONFIG_FMOE=$PWD/mimo_v2.6_flash_a8w4_tuned_fmoe.csv \
   pytest -s doc-mimo/kernels/test_flydsl_moe_a16wfp4.py::test_flydsl_a16wfp4_silu_e2e
 
 # 8 卡
-torchrun --nproc_per_node=8 doc-mimo/kernels/test_a8w4_gemm2_tp.py -t 128 512 2048 -r uniform --tile 32,128,1
+torchrun --nproc_per_node=8 doc-mimo/kernels/twoshot_allreduce.py -t 128 512 2048 -r uniform --tile 32,128,1
 torchrun --nproc_per_node=8 doc-mimo/comm/peer_atomic_probe.py
 torchrun --nproc_per_node=8 doc-mimo/comm/peer_store_probe.py
 torchrun --nproc_per_node=8 doc-mimo/comm/twoshot_bench.py 128 256 512 1024 2048
@@ -121,7 +121,7 @@ torchrun --nproc_per_node=8 doc-mimo/comm/twoshot_bench.py 128 256 512 1024 2048
 
 ## 4. 卡间通讯（TP8 下 gemm2 之后的 all-reduce）
 
-inter_dim=256 是 TP8 下每卡的切分，所以 gemm2 之后还要做 8 卡 all-reduce。`test_a8w4_gemm2_tp.py` 的设定：
+inter_dim=256 是 TP8 下每卡的切分，所以 gemm2 之后还要做 8 卡 all-reduce。`twoshot_allreduce.py` 的设定：
 
 - 各 rank 的路由相同，W2 和 stage-1 中间结果的分片各不相同；
 - 计时取最慢的 rank；
@@ -184,7 +184,7 @@ inter_dim=256 是 TP8 下每卡的切分，所以 gemm2 之后还要做 8 卡 al
 | one-shot push | 28 MB | 约 92 us，比 RCCL 慢 |
 | two-shot（reduce-scatter 加 all-gather） | 2 × 3.5 MB | 约 27 us 加同步，**可行** |
 
-### 4.4 two-shot all-reduce（`kernels/test_a8w4_gemm2_tp.py`：`SymmetricBuffer`、`compile_twoshot_allreduce`、`TwoShotAllreduce`）
+### 4.4 two-shot all-reduce（`kernels/twoshot_allreduce.py`：`SymmetricBuffer`、`compile_twoshot_allreduce`、`TwoShotAllreduce`）
 
 **symmetric buffer**
 
@@ -224,7 +224,7 @@ inter_dim=256 是 TP8 下每卡的切分，所以 gemm2 之后还要做 8 卡 al
 | 1024 | 8 MB | 101 us | **60.8 us** | 105 us |
 | 2048 | 16 MB | 157–263 us | **110 us** | 572 us |
 
-TP 测试（`test_a8w4_gemm2_tp.py`，profiler 统计 kernel 时间，tile_m=32 加 dyn_rows）：
+TP 测试（`twoshot_allreduce.py`，profiler 统计 kernel 时间，tile_m=32 加 dyn_rows）：
 
 | tokens | gemm2 | RCCL | **twoshot** | gemm2+RCCL | **gemm2+twoshot** |
 |---|---|---|---|---|---|

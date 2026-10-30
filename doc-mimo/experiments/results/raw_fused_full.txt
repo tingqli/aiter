@@ -1,0 +1,2 @@
+tok=  512  
+    gemm2(m)=67.1  gemm2(g)=67.0  twoshot=32.3  gemm2(m)+twoshot=103.2  fused c32 v1 skip=103.6

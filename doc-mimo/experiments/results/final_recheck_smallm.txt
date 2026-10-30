@@ -1,0 +1,15 @@
+== F1 c32,c64 ch256,ch1024 10:45:23
+tok=  128  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c32 v1 ch1024: bad=0 maxdiff=0.25  fused c64 v1 ch256: bad=0 maxdiff=0.25  fused c64 v1 ch1024: bad=0 maxdiff=0.25
+    gemm2(m)=52.4  gemm2(g)=54.6  twoshot=12.8  gemm2(m)+twoshot=65.7  fused c32 v1 ch256=75.9  fused c32 v1 ch1024=76.3  fused c64 v1 ch256=75.6  fused c64 v1 ch1024=77.2
+tok=  256  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c32 v1 ch1024: bad=0 maxdiff=0.25  fused c64 v1 ch256: bad=0 maxdiff=0.25  fused c64 v1 ch1024: bad=0 maxdiff=0.25
+    gemm2(m)=55.7  gemm2(g)=58.9  twoshot=20.6  gemm2(m)+twoshot=79.4  fused c32 v1 ch256=77.2  fused c32 v1 ch1024=77.1  fused c64 v1 ch256=76.6  fused c64 v1 ch1024=79.1
+tok=  512  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c32 v1 ch1024: bad=0 maxdiff=0.25  fused c64 v1 ch256: bad=0 maxdiff=0.25  fused c64 v1 ch1024: bad=0 maxdiff=0.25
+    gemm2(m)=67.8  gemm2(g)=67.7  twoshot=31.3  gemm2(m)+twoshot=104.1  fused c32 v1 ch256=91.1  fused c32 v1 ch1024=94.8  fused c64 v1 ch256=91.4  fused c64 v1 ch1024=96.3
+== F2 c32,c64 ch256,ch1024 10:47:59
+tok=  128  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c32 v1 ch1024: bad=0 maxdiff=0.25  fused c64 v1 ch256: bad=0 maxdiff=0.25  fused c64 v1 ch1024: bad=0 maxdiff=0.25
+    gemm2(m)=51.5  gemm2(g)=54.8  twoshot=12.8  gemm2(m)+twoshot=65.1  fused c32 v1 ch256=74.3  fused c32 v1 ch1024=71.7  fused c64 v1 ch256=73.3  fused c64 v1 ch1024=79.0
+tok=  256  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c32 v1 ch1024: bad=0 maxdiff=0.25  fused c64 v1 ch256: bad=0 maxdiff=0.25  fused c64 v1 ch1024: bad=0 maxdiff=0.25
+    gemm2(m)=55.4  gemm2(g)=59.3  twoshot=20.5  gemm2(m)+twoshot=79.0  fused c32 v1 ch256=80.7  fused c32 v1 ch1024=76.3  fused c64 v1 ch256=76.9  fused c64 v1 ch1024=78.6
+tok=  512  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c32 v1 ch1024: bad=0 maxdiff=0.25  fused c64 v1 ch256: bad=0 maxdiff=0.25  fused c64 v1 ch1024: bad=0 maxdiff=0.25
+    gemm2(m)=65.9  gemm2(g)=66.6  twoshot=31.0  gemm2(m)+twoshot=103.5  fused c32 v1 ch256=90.3  fused c32 v1 ch1024=95.0  fused c64 v1 ch256=92.4  fused c64 v1 ch1024=96.0
+== done 10:48:35

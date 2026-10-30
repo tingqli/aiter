@@ -1,0 +1,12 @@
+tok=  128 bm=32 dyn_m=0  push bad=0 ({'q8push': 0, 'q8pushs': 0} on rank0)  q8 vs bf16: rel=0.0287 cos_diff=2.62e-04 byte_mismatch=9.88e-04 scale_mismatch=1
+    bf16=90.7us  bf16+quant=96.2us  q8=90.7us  q8+AG=105.5us  AG=11.0us  q8push+wait=100.5us  q8push=94.2us  q8pushs+wait=98.8us  q8pushs=94.9us
+tok=  128 bm=64 dyn_m=1  push bad=0 ({'q8push': 0, 'q8pushs': 0} on rank0)  q8 vs bf16: rel=0.0287 cos_diff=2.62e-04 byte_mismatch=9.88e-04 scale_mismatch=1
+    bf16=90.5us  bf16+quant=99.9us  q8=90.6us  q8+AG=107.7us  AG=11.4us  q8push+wait=100.5us  q8push=95.2us  q8pushs+wait=99.1us  q8pushs=93.7us
+tok=  512 bm=32 dyn_m=0  push bad=0 ({'q8push': 0, 'q8pushs': 0} on rank0)  q8 vs bf16: rel=0.0245 cos_diff=2.62e-04 byte_mismatch=9.13e-04 scale_mismatch=1
+    bf16=102.2us  bf16+quant=105.6us  q8=99.6us  q8+AG=129.7us  AG=34.0us  q8push+wait=138.6us  q8push=122.7us  q8pushs+wait=127.0us  q8pushs=117.3us
+tok=  512 bm=64 dyn_m=1  push bad=0 ({'q8push': 0, 'q8pushs': 0} on rank0)  q8 vs bf16: rel=0.0245 cos_diff=2.62e-04 byte_mismatch=9.13e-04 scale_mismatch=1
+    bf16=99.2us  bf16+quant=109.1us  q8=98.4us  q8+AG=132.0us  AG=35.1us  q8push+wait=137.9us  q8push=123.5us  q8pushs+wait=125.8us  q8pushs=116.4us
+tok= 2048 bm=32 dyn_m=0  push bad=0 ({'q8push': 0, 'q8pushs': 0} on rank0)  q8 vs bf16: rel=0.0245 cos_diff=2.61e-04 byte_mismatch=9.00e-04 scale_mismatch=1
+    bf16=210.0us  bf16+quant=217.5us  q8=207.3us  q8+AG=358.1us  AG=137.1us  q8push+wait=369.4us  q8push=319.5us  q8pushs+wait=304.7us  q8pushs=270.4us
+tok= 2048 bm=64 dyn_m=1  push bad=0 ({'q8push': 0, 'q8pushs': 0} on rank0)  q8 vs bf16: rel=0.0245 cos_diff=2.61e-04 byte_mismatch=9.00e-04 scale_mismatch=1
+    bf16=201.7us  bf16+quant=212.8us  q8=193.4us  q8+AG=327.7us  AG=137.7us  q8push+wait=341.1us  q8push=319.6us  q8pushs+wait=281.2us  q8pushs=253.3us

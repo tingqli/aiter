@@ -28,6 +28,7 @@ Run:
 import argparse
 import functools
 import itertools
+import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -43,6 +44,7 @@ import aiter
 from aiter import QuantType, dtypes
 from aiter.fused_moe import fused_topk, moe_sorting
 from aiter.jit.utils.chip_info import get_gfx
+from aiter.ops.flydsl.kernels import buffer_ops
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_gemm2
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.utils import (
@@ -67,6 +69,20 @@ from aiter.test_common import benchmark, checkAllclose, run_perftest
 from aiter.utility import fp4_utils
 
 SUPPORTED_GFX = ["gfx942"]  # FP8-FNUZ MFMA + global bf16x2 atomics
+# LDS epilogue: drain the sorted-id loads before the first atomic (see
+# _atomic_bf16_epilog); tagged into the kernel name ("_dr") so the JIT key changes
+EPI_DRAIN = os.environ.get("EPI_DRAIN", "1") == "1"
+# LDS epilogue bf16 rounding: RNE by integer add, no NaN canonicalization (2 VALU
+# per value vs 5 + s_nop); partials are finite. Tagged "_bf".
+BF16_FAST = os.environ.get("BF16_FAST", "0") == "1"
+# fp4 -> fp8 decode without the even/odd interleave v_perms ("_wp", 2 of 6 perms
+# per dword). Correct with the STANDARD preshuffled weight: the single-hot probe
+# (experiments/scripts/wperm_probe.py) pairs A[k] with W[k] either way; the reason
+# was not pinned down. No measurable speedup (doc sec 11), so off by default.
+WPERM = os.environ.get("WPERM", "0") == "1"
+# persistent-lite experiment: launch PERSIST * #CU compute CTAs that loop over the
+# tiles (grid stride) instead of one CTA per tile; 0 = off. Tagged "_p{k}".
+PERSIST = int(os.environ.get("PERSIST", "0"))
 TOL_ERR_RATIO = 0.05
 ROUTINGS = ["uniform", "hot"]
 # "hot" routing: 1/32 of the experts get this score bias, so they land in most
@@ -139,8 +155,11 @@ def _fp4x8_to_fp8x8(raw, lut):
         hi, lo, sel_even
     )
     odd = (_perm_u32(sign_hi, sign_lo, sel_odd) & raw) | _perm_u32(hi, lo, sel_odd)
-    lo32 = _perm_u32(odd, even, 0x05010400).bitcast(fx.Int32)
-    hi32 = _perm_u32(odd, even, 0x07030602).bitcast(fx.Int32)
+    if WPERM:  # even = k0..k3, odd = k4..k7 already
+        lo32, hi32 = even.bitcast(fx.Int32), odd.bitcast(fx.Int32)
+    else:
+        lo32 = _perm_u32(odd, even, 0x05010400).bitcast(fx.Int32)
+        hi32 = _perm_u32(odd, even, 0x07030602).bitcast(fx.Int32)
     return fx.Vector.from_elements([lo32, hi32], fx.Int32).bitcast(fx.Float8E4M3FNUZ)
 
 
@@ -302,13 +321,31 @@ def _atomic_bf16_epilog(
         for J in range_constexpr(num_acc_n):
             col = wave * fx.Int32(n_per_wave) + fx.Int32(J * 16) + lane_mod_16
             vec = Vec(accm[i][J])
-            bf4 = Vec.from_elements(
+            prod = Vec.from_elements(
                 [vec[v] * w[v] for v in range_constexpr(4)], fx.Float32
-            ).to(fx.BFloat16)
+            )
+            if const_expr(BF16_FAST):
+                # RNE: high half of bits + 0x7FFF + lsb(bits >> 16) (finite inputs)
+                u = Vec(prod.bitcast(fx.Int32))
+                r = [
+                    fx.Int32(u[v]) + fx.Int32(0x7FFF)
+                    + ((fx.Int32(u[v]) >> fx.Int32(16)) & fx.Int32(1))
+                    for v in range_constexpr(4)
+                ]
+                hi = Vec(Vec.from_elements(r, fx.Int32).bitcast(fx.BFloat16))
+                bf4 = [hi[2 * v + 1] for v in range_constexpr(4)]
+            else:
+                bf4 = prod.to(fx.BFloat16)
             for v in range_constexpr(4):
                 lds_bf16[(row_base + fx.Int32(v)) * fx.Int32(BN) + col] = bf4[v]
 
     gpu.barrier()
+    if const_expr(EPI_DRAIN):
+        # Drain the (long-landed) sorted-id loads before the first atomic: gfx9 has
+        # one in-order vmcnt for loads and stores, so a token id consumed after
+        # atomics were issued makes LLVM wait for those atomics (ATT: ~0.57 us/wave
+        # of mid-epilogue vmcnt stalls serializing the atomic groups).
+        rocdl.s_waitcnt(vmcnt=0)
 
     for mr in range_constexpr(M_REPS):
         row_in_block = fx.Int32(mr * 8) + m_lane
@@ -336,6 +373,88 @@ def _atomic_bf16_epilog(
                 )
 
 
+@flyc.jit
+def _route_bf16_epilog(
+    lds_base_i32, accm, arg_out, arg_stids, arg_sweights, m_row, n_block, wave, lane,
+    i32_M, i32_topk, BM, N_OUT, BN,
+):
+    """Route-row variant of ``_atomic_bf16_epilog`` (fused all-reduce experiment,
+    topk-sum in the comm phase): same weighted bf16 LDS staging, but each routed
+    row is STORED (no atomics) to its own row ``out[token * topk + slot, n]``,
+    write-through (sc0|sc1) so comm WGs on other XCDs read it past their L2.
+    ``out`` is [tokens * topk, N_OUT]; no zeroing needed (every row is written)."""
+    M_CHUNKS = len(accm)
+    M_REPS = M_CHUNKS * 2  # 256 threads = 8 rows x 32 lanes per pass
+    n_per_wave = BN // 4
+    num_acc_n = n_per_wave // 16
+    s_count = BN // 64  # each pass covers 64 cols (32 lanes x 2)
+    lane_div_16 = lane // fx.Int32(16)
+    lane_mod_16 = lane % fx.Int32(16)
+    lds_bf16 = lds_typed_ptr(lds_base_i32, T.bf16)
+
+    tx = fx.Int32(gpu.thread_id("x"))
+    m_lane = tx // fx.Int32(32)
+    col_start = (tx % fx.Int32(32)) * fx.Int32(2)
+
+    stids = _flat_buffer(arg_stids, T.i32, 4)
+    sweights = _flat_buffer(arg_sweights, T.f32, 4)
+    load_i32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+    load_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+    route = buffer_ops.create_buffer_resource_from_addr(
+        _raw(fx.Int64(arg_out)),
+        num_records_bytes=_raw(fx.Int64(i32_M * i32_topk) * fx.Int64(N_OUT * 2)),
+    )
+
+    def load_scalar(atom, src, index, elem_ty):
+        frag = fx.make_rmem_tensor(1, elem_ty)
+        fx.copy(atom, src[None, index], frag)
+        return Vec(frag.load())[0]
+
+    packed = []
+    for mr in range_constexpr(M_REPS):
+        sorted_pos = m_row + fx.Int32(mr * 8) + m_lane
+        packed.append(load_scalar(load_i32, stids, sorted_pos, fx.Int32))
+
+    for i in range_constexpr(M_CHUNKS):
+        row_base = fx.Int32(i * 16) + lane_div_16 * fx.Int32(4)
+        w = [
+            load_scalar(load_f32, sweights, m_row + row_base + fx.Int32(v), fx.Float32)
+            for v in range_constexpr(4)
+        ]
+        for J in range_constexpr(num_acc_n):
+            col = wave * fx.Int32(n_per_wave) + fx.Int32(J * 16) + lane_mod_16
+            vec = Vec(accm[i][J])
+            bf4 = Vec.from_elements(
+                [vec[v] * w[v] for v in range_constexpr(4)], fx.Float32
+            ).to(fx.BFloat16)
+            for v in range_constexpr(4):
+                lds_bf16[(row_base + fx.Int32(v)) * fx.Int32(BN) + col] = bf4[v]
+
+    gpu.barrier()
+
+    for mr in range_constexpr(M_REPS):
+        row_in_block = fx.Int32(mr * 8) + m_lane
+        token_id = packed[mr] & fx.Int32(0x00FFFFFF)
+        if token_id < i32_M:  # padding rows carry a sentinel token id
+            route_row = token_id * i32_topk + packed[mr].shrui(fx.Int32(24))
+            row_base_addr = route_row * fx.Int32(N_OUT) + n_block * fx.Int32(BN) + col_start
+            for s in range_constexpr(s_count):
+                idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
+                pk = lds_vec_load(
+                    lds_base_i32,
+                    idx0 * fx.Int32(2),
+                    Vec.make_type(2, fx.BFloat16),
+                    fx.BFloat16,
+                    align=4,
+                )
+                buffer_ops.buffer_store(
+                    fx.Int32(Vec(pk).bitcast(fx.Int32)[0]),  # scalar: v1i32 store crashes isel
+                    route,
+                    (row_base_addr + fx.Int32(s * 64)) // fx.Int32(2),
+                    cache_modifier=17,
+                )
+
+
 # =============================================================================
 # Kernel
 # =============================================================================
@@ -356,8 +475,38 @@ def compile_a8w4_gemm2(
     flush_tiny=True,
     epilog="lds",
     dyn_rows=False,
+    A_GROUP=0,
+    TILE_ORDER="m",
+    PROBE=False,
+    CHUNK_N=512,
+    AR=None,
+    AR_SEP=False,
 ):
     """Build the A8W4 stage2 launcher (N = model_dim, K = inter_dim).
+
+    ``TILE_ORDER`` (experiment, fused all-reduce idea): ``"m"`` (default) = m-block
+    major tiles (all N tiles of an m-block adjacent); ``"n"`` = N-major (the grid
+    sweeps output columns left to right, so a column chunk is final early), with
+    the per-XCD contiguous remap; ``"nx"`` = N-major in plain dispatch order;
+    ``"g"`` = column groups of ``CHUNK_N`` swept in order, each group m-major with
+    the per-XCD contiguous remap inside the group (locality of "m", chunks final
+    one after another).
+    ``PROBE``: thread 0 of every WG writes (start, end) ``s_memrealtime`` (end after
+    its atomics completed) to ``dbg`` int64 [m_blocks * n_blocks, 2] (m-major index).
+    ``AR``: fused all-reduce (``gemm2_ar_fused.ar_config`` tuple; needs "g"): the
+    first ``cwg`` WGs of the grid run the chunked two-shot all-reduce of ``out``
+    over the TP peers (``tbl``) while the rest compute; every compute WG bumps its
+    column chunk's ready counter once its atomics have landed.
+    ``AR_SEP``: no comm WGs in this kernel (only the ready counters); the comm
+    role runs as its own kernel concurrently on another stream
+    (``gemm2_ar_fused.compile_ar_kernel``), with its own register allocation.
+
+    ``A_GROUP``: 0 = one A scale per sorted row (``a_scale`` f32 [sorted_size]);
+    128 = one per (sorted row, 128-K group) (``a_scale`` f32 [sorted_size, K/128],
+    as written by gemm1's fused-quant ``q8s`` epilogue). Each group accumulates
+    into its own accumulators, combined at dequant as sum_g acc_g * s_g (a single
+    accumulator rescaled by s_g/s_{g+1} at group boundaries needed more VGPRs:
+    the compiler hoists the scale loads + divides; 89 vs 77 at bm32).
 
     ``epilog``: ``"lds"`` (default) stages a weighted bf16 tile in LDS
     (BM*TILE_N*2, half the port's f32 staging) for 128 B contiguous atomics;
@@ -384,6 +533,37 @@ def compile_a8w4_gemm2(
     assert BM % 16 == 0, f"BM must be a multiple of 16, got {BM}"
     assert (BM * TILE_K) % (256 * 16) == 0, "A tile must be whole 16 B per thread"
     assert epilog in ("direct", "lds"), f"epilog must be direct or lds, got {epilog!r}"
+    assert A_GROUP in (0, 128), f"A_GROUP must be 0 or 128, got {A_GROUP}"
+    assert TILE_ORDER in ("m", "n", "nx", "g"), TILE_ORDER
+    assert N_OUT % CHUNK_N == 0 and CHUNK_N % TILE_N == 0
+    CG = CHUNK_N // TILE_N  # n-blocks per column chunk / group
+    if AR is not None:
+        assert TILE_ORDER == "g" or (len(AR) > 7 and AR[7]), (
+            "fused all-reduce needs column-group order (unless nodep)"
+        )
+        from gemm2_ar_fused import (  # noqa: PLC0415
+            AR_TAG, ar_layout, build_ar_role, cnt_slot, tbl_entry,
+        )
+
+        AR_CWG = 0 if AR_SEP else AR[1]
+        assert AR_CWG % 8 == 0, "comm WGs must keep compute WGs XCD-aligned"
+        AR_L = ar_layout(*AR, D=N_OUT, chunk=CHUNK_N)
+        # experiment knob for the per-WG ready signal (str: part of the JIT key)
+        AR_HOOK = os.environ.get("AR_HOOK", "wave")  # wave|full|novm|nocnt|none
+        ar_role = (
+            None if AR_SEP
+            else build_ar_role(*AR, D=N_OUT, chunk=CHUNK_N, cg=CG, hook=AR_HOOK)
+        )
+    else:
+        AR_CWG = 0
+        AR_HOOK = "none"
+        AR_TAG = ""
+    HOOK_MOD = 64 if AR_HOOK == "wave" else 1 << 20  # counting thread: lane 0 / tx 0
+    HOOK_TX = -1 if AR_HOOK == "nocnt" else 0
+    ROUTE = AR[6] if AR is not None and len(AR) > 6 else 0
+    if ROUTE:
+        assert epilog == "lds", "route rows use the LDS epilogue"
+    A_GROUPS = K // 128 if A_GROUP else 1  # A scale groups (= accumulator sets)
 
     NUM_N_BLOCKS = N_OUT // TILE_N
     K_TILES = K // TILE_K
@@ -408,7 +588,14 @@ def compile_a8w4_gemm2(
     kname = (
         f"a8w4_gemm2_h{N_OUT}_i{K}_ne{NE}_bm{BM}_tn{TILE_N}_tk{TILE_K}"
         f"_bcm{b_cache_mod}_xcd{xcd_swizzle}{wpe_tag}{ftz_tag}_{epilog}"
-        f"{'_dyn' if dyn_rows else ''}"
+        f"{'_dr' if EPI_DRAIN and epilog == 'lds' else ''}"
+        f"{'_bf' if BF16_FAST and epilog == 'lds' else ''}{'_wp' if WPERM else ''}"
+        f"{f'_p{PERSIST}' if PERSIST else ''}"
+        f"{'_dyn' if dyn_rows else ''}{f'_ag{A_GROUP}' if A_GROUP else ''}"
+        f"{'' if TILE_ORDER == 'm' else '_o' + TILE_ORDER}{'_probe' if PROBE else ''}"
+        f"{f'_c{CHUNK_N}' if TILE_ORDER == 'g' else ''}"
+        f"{'' if AR is None else '_ar' + '_'.join(str(x).replace('-', 'm') for x in AR) + '_' + AR_HOOK + '_' + AR_TAG}"
+        f"{'_sep' if AR_SEP else ''}"
     )
 
     def _body(
@@ -548,16 +735,50 @@ def compile_a8w4_gemm2(
                 fx.copy_atom_call(lds_read_atom, fx.slice(lds_tiles8, (None, off)), r)
                 return fx.Vector(fx.memref_load_vec(r)).bitcast(fx.Float8E4M3FNUZ)
 
-            # ---- accumulators -------------------------------------------------------
+            # ---- accumulators (one set per A scale group) ---------------------------
             acc_layout = fx.make_layout(4, 1)
-            accm = [
-                [fx.make_rmem_tensor(acc_layout, fx.Float32) for _ in range(N_REPEAT)]
-                for _ in range(M_REPEAT)
+            accg = [
+                [
+                    [fx.make_rmem_tensor(acc_layout, fx.Float32) for _ in range(N_REPEAT)]
+                    for _ in range(M_REPEAT)
+                ]
+                for _ in range(A_GROUPS)
             ]
+            accm = accg[0]
             zero4 = fx.Vector.filled(4, 0.0, fx.Float32)
-            for mi in range_constexpr(M_REPEAT):
-                for ni in range_constexpr(N_REPEAT):
-                    accm[mi][ni].store(zero4)
+            for acc in accg:
+                for mi in range_constexpr(M_REPEAT):
+                    for ni in range_constexpr(N_REPEAT):
+                        acc[mi][ni].store(zero4)
+
+            as_tiles = _global_i32_buffer_tiles(arg_a_scale, fx.Int64(0xFFFFFFFF), 1)
+            as_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+            # grouped: the A_GROUPS scales of a row are contiguous -> one load
+            asg_tiles = _global_i32_buffer_tiles(
+                arg_a_scale, fx.Int64(0xFFFFFFFF), A_GROUPS
+            )
+            asg_atom = (
+                fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
+                if A_GROUPS == 2
+                else fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
+                if A_GROUPS == 4
+                else None
+            )
+
+            def a_scales_row(mi, ii):
+                """[A_GROUPS] f32 scales of this lane's row ii of block mi."""
+                row = m_row + fx.Int32(mi * 16 + ii) + lane_div_16 * fx.Int32(4)
+                if const_expr(asg_atom is None):
+                    return [
+                        _buffer_i32_scalar_read(
+                            as_tiles, row * fx.Int32(A_GROUPS) + fx.Int32(g), as_atom
+                        ).bitcast(fx.Float32)
+                        for g in range(A_GROUPS)
+                    ]
+                r = fx.make_rmem_tensor(fx.make_layout(A_GROUPS, 1), fx.Int32)
+                fx.copy(asg_atom, fx.slice(asg_tiles, (None, row)), r)
+                v = fx.Vector(fx.memref_load_vec(r))
+                return [fx.Int32(v[g]).bitcast(fx.Float32) for g in range(A_GROUPS)]
 
             # ---- K loop (static: K = inter_dim is a few tiles) ----------------------
             for kt in range_constexpr(K_TILES):
@@ -582,30 +803,33 @@ def compile_a8w4_gemm2(
                     ]
                     for ku in range_constexpr(K_STEPS):
                         b8 = _fp4x8_to_fp8x8(raw[ni][ku // 4][ku % 4], luts[ku // 4])
+                        gg = base_k // 128 + ku // 4  # 128-K group of this K step
+                        acc = accg[gg if A_GROUP else 0]
                         for mi in range_constexpr(M_REPEAT):
-                            _mma_fp8(mma_atom, accm[mi][ni], load_a(mi, ku), b8)
+                            _mma_fp8(mma_atom, acc[mi][ni], load_a(mi, ku), b8)
                 gpu.barrier()  # A reads done before the slot (or the epilogue) reuses LDS
 
-            # ---- dequant: acc * a_scale[sorted_row] * 2**(exp-132) ------------------
-            as_tiles = _global_i32_buffer_tiles(arg_a_scale, fx.Int64(0xFFFFFFFF), 1)
-            as_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+            # ---- dequant: sum_g acc_g * a_scale[row, g] * 2**(exp-132) --------------
             f_n = [_channel_factor(x) for x in exp_n]
             for mi in range_constexpr(M_REPEAT):
-                row0 = m_row + fx.Int32(mi * 16) + lane_div_16 * fx.Int32(4)
+                per_row = [a_scales_row(mi, ii) for ii in range_constexpr(4)]
                 rs = [
-                    _buffer_i32_scalar_read(as_tiles, row0 + fx.Int32(ii), as_atom).bitcast(
-                        fx.Float32
-                    )
-                    for ii in range_constexpr(4)
+                    [per_row[ii][g] for ii in range_constexpr(4)]
+                    for g in range_constexpr(A_GROUPS)
                 ]
                 for ni in range_constexpr(N_REPEAT):
-                    v = Vec(accm[mi][ni].load())
-                    accm[mi][ni].store(
-                        Vec.from_elements(
-                            [v[ii] * (rs[ii] * f_n[ni]) for ii in range_constexpr(4)],
-                            fx.Float32,
-                        )
-                    )
+                    if const_expr(A_GROUP):
+                        vs = [Vec(accg[g][mi][ni].load()) for g in range(A_GROUPS)]
+                        out4 = []
+                        for ii in range_constexpr(4):
+                            t = vs[0][ii] * rs[0][ii]
+                            for g in range_constexpr(1, A_GROUPS):
+                                t = t + vs[g][ii] * rs[g][ii]
+                            out4.append(t * f_n[ni])
+                    else:
+                        v = Vec(accm[mi][ni].load())
+                        out4 = [v[ii] * (rs[0][ii] * f_n[ni]) for ii in range_constexpr(4)]
+                    accm[mi][ni].store(Vec.from_elements(out4, fx.Float32))
 
             # ---- epilogue: routing weight + bf16x2 atomic scatter -------------------
             accm_v = [
@@ -623,6 +847,23 @@ def compile_a8w4_gemm2(
                     lane,
                     i32_M,
                     N_OUT,
+                )
+            elif const_expr(ROUTE):
+                _route_bf16_epilog(
+                    fx.Int32(fx.ptrtoint(lds_ptr)),
+                    accm_v,
+                    arg_out,
+                    arg_stids,
+                    arg_sweights,
+                    m_row,
+                    n_block,
+                    wave,
+                    lane,
+                    i32_M,
+                    fx.Int32(ROUTE),
+                    BM,
+                    N_OUT,
+                    TILE_N,
                 )
             else:
                 _atomic_bf16_epilog(
@@ -696,10 +937,14 @@ def compile_a8w4_gemm2(
         arg_sweights,
         arg_out,
         i32_M,
+        arg_dbg,
+        arg_tbl,
+        i32_rank,
+        i32_epoch,
     ):
         lds_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         tx = fx.Int32(gpu.thread_id("x"))
-        bx = fx.Int32(gpu.block_id("x"))
+        bx = fx.Int32(gpu.block_id("x")) - fx.Int32(AR_CWG)  # compute WG index
         lane = tx % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx // fx.Int32(64))
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
@@ -723,7 +968,33 @@ def compile_a8w4_gemm2(
             wig = wgid % ng
             return (first_m + wig % group_m) * fx.Int32(NUM_N_BLOCKS) + wig // group_m
 
-        if bx < bound:
+        def _tile_work(t):
+            if const_expr(TILE_ORDER == "m"):
+                tile = _xcd(t)
+            elif const_expr(TILE_ORDER == "g"):
+                # group g = column chunk g; inside it m-major + per-XCD contiguous
+                gs = total_m_blocks * fx.Int32(CG)
+                grp = t // gs
+                loc = t - grp * gs
+                gq = _udiv(gs, NXCD)
+                gr = _umod(gs, NXCD)
+                gxc = _umod(loc, NXCD)
+                wg = gxc * gq + fx.min(gxc, gr) + _udiv(loc, NXCD)
+                tile = (wg // fx.Int32(CG)) * fx.Int32(NUM_N_BLOCKS) + grp * fx.Int32(
+                    CG
+                ) + wg % fx.Int32(CG)
+            else:
+                tt = _xcd(t) if const_expr(TILE_ORDER == "n") else t
+                # N-major t -> (m_block, n_block) -> m-major tile id used by _body
+                tile = (tt % total_m_blocks) * fx.Int32(NUM_N_BLOCKS) + tt // total_m_blocks
+            if const_expr(PROBE):
+                t_start = fx.Int64(
+                    llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], [])
+                )
+            if const_expr(AR is not None and AR_HOOK != "none"):
+                # ready-counter base, fetched before the tile so it is long in SGPRs
+                # by the hook (ATT: a dependent vector load here cost ~0.3 us/WG)
+                own = tbl_entry(arg_tbl, AR[0], i32_rank)
             _body(
                 lds_ptr,
                 arg_a,
@@ -735,10 +1006,68 @@ def compile_a8w4_gemm2(
                 arg_sweights,
                 arg_out,
                 i32_M,
-                _xcd(bx),
+                tile,
                 lane,
                 wave,
             )
+            if const_expr(PROBE):
+                rocdl.s_waitcnt(vmcnt=0)  # this WG's atomics performed
+                gpu.barrier()
+                if tx == fx.Int32(0):
+                    t_end = fx.Int64(
+                        llvm.call_intrinsic(
+                            T.i64, "llvm.amdgcn.s.memrealtime", [], [], []
+                        )
+                    )
+                    dbg = global_typed_ptr(arg_dbg, T.i64, align=8)
+                    dbg[tile * fx.Int32(2)] = t_start
+                    dbg[tile * fx.Int32(2) + fx.Int32(1)] = t_end
+            if const_expr(AR is not None and AR_HOOK != "none"):
+                # chunk ready counter: this WG's atomics landed (vmcnt covers
+                # non-returning atomics on gfx9) -> count it for its column chunk
+                if const_expr(AR_HOOK != "novm"):
+                    rocdl.s_waitcnt(vmcnt=0)
+                if const_expr(AR_HOOK != "wave"):
+                    gpu.barrier()
+                # "wave": every wave counts itself (target x4), no WG barrier
+                if tx % fx.Int32(HOOK_MOD) == fx.Int32(HOOK_TX):  # -1: never
+                    chunk = (tile % fx.Int32(NUM_N_BLOCKS)) // fx.Int32(CG)
+                    slot = (
+                        (i32_epoch & fx.Int32(1)) * fx.Int32(N_OUT // CHUNK_N) + chunk
+                    ) * fx.Int32(AR_L["nslot"]) + cnt_slot(bx)
+                    llvm.AtomicRMWOp(
+                        llvm.AtomicBinOp.add,
+                        _gep1(
+                            _global_base_ptr1(own + fx.Int64(AR_L["cnt"])),
+                            slot * fx.Int32(256),
+                        ),
+                        _raw(fx.Int32(1)),
+                        llvm.AtomicOrdering.monotonic,
+                        syncscope="agent",
+                        alignment=4,
+                    )
+
+        if (bx >= fx.Int32(0)) & (bx < bound):
+            if const_expr(PERSIST):
+                # persistent-lite: a fixed set of compute CTAs strides over the
+                # tiles (CTA count % 8 == 0 keeps every tile on its XCD)
+                n_cta = fx.Int32(gpu.grid_dim.x) - fx.Int32(AR_CWG)
+                for t in range(bx, bound, n_cta):
+                    _tile_work(t)
+                    gpu.barrier()  # LDS reuse by this CTA's next tile
+            else:
+                _tile_work(bx)
+        if const_expr(AR is not None and not AR_SEP):
+            if bx < fx.Int32(0):
+                ar_role(
+                    arg_tbl,
+                    arg_out,
+                    i32_M,
+                    i32_rank,
+                    i32_epoch,
+                    bx + fx.Int32(AR_CWG),
+                    total_m_blocks,
+                )
 
     @flyc.kernel(name=kname, known_block_size=[256, 1, 1])
     def a8w4_gemm2_kernel(
@@ -752,6 +1081,10 @@ def compile_a8w4_gemm2(
         arg_sweights: fx.Int64,
         arg_out: fx.Int64,
         i32_M: fx.Int32,
+        arg_dbg: fx.Int64,
+        arg_tbl: fx.Int64,
+        i32_rank: fx.Int32,
+        i32_epoch: fx.Int32,
     ):
         _entry(
             arg_a,
@@ -764,6 +1097,10 @@ def compile_a8w4_gemm2(
             arg_sweights,
             arg_out,
             i32_M,
+            arg_dbg,
+            arg_tbl,
+            i32_rank,
+            i32_epoch,
         )
 
     @flyc.jit
@@ -778,6 +1115,10 @@ def compile_a8w4_gemm2(
         arg_sweights: fx.Int64,
         arg_out: fx.Int64,
         i32_M: fx.Int32,
+        arg_dbg: fx.Int64,
+        arg_tbl: fx.Int64,
+        i32_rank: fx.Int32,
+        i32_epoch: fx.Int32,
         i32_grid: fx.Int32,
         stream: fx.Stream,
     ):
@@ -792,6 +1133,10 @@ def compile_a8w4_gemm2(
             arg_sweights,
             arg_out,
             i32_M,
+            arg_dbg,
+            arg_tbl,
+            i32_rank,
+            i32_epoch,
             value_attrs=(
                 {"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None
             ),
@@ -821,10 +1166,24 @@ def a8w4_gemm2(
     waves_per_eu=None,
     epilog="lds",
     dyn_rows=False,
+    a_group=0,
+    tile_order="m",
+    dbg=None,
+    chunk_n=512,
+    ar=None,
+    tbl=None,
+    rank=0,
+    epoch=0,
+    ar_sep=False,
 ):
     """Host launcher. ``out`` is bf16 ``[tokens, model_dim]``; it is accumulated
-    into (atomics), so the caller zeroes it (moe_sorting's moe_buf already is)."""
+    into (atomics), so the caller zeroes it (moe_sorting's moe_buf already is).
+    ``a_group=128``: ``a_scale`` is f32 [sorted_size, inter_dim/128].
+    ``dbg``: int64 [m_blocks * n_blocks * 2] -> per-WG timestamp probe.
+    ``ar``/``tbl``/``rank``/``epoch``: fused all-reduce (see gemm2_ar_fused)."""
     tokens, model_dim = out.shape
+    if ar is not None and len(ar) > 6 and ar[6]:
+        tokens //= ar[6]  # route mode: out is [tokens * topk, model_dim]
     inter_dim = a_fp8.shape[1]
     launch = compile_a8w4_gemm2(
         D_HIDDEN=model_dim,
@@ -839,8 +1198,17 @@ def a8w4_gemm2(
         waves_per_eu=waves_per_eu,
         epilog=epilog,
         dyn_rows=dyn_rows,
+        A_GROUP=a_group,
+        TILE_ORDER=tile_order,
+        PROBE=dbg is not None,
+        CHUNK_N=chunk_n,
+        AR=ar,
+        AR_SEP=ar_sep,
     )
     grid = sorted_expert_ids.numel() * (model_dim // tile_n)
+    if PERSIST:  # k compute CTAs per CU (multiple of 8: XCD-aligned)
+        grid = min(grid, PERSIST * torch.cuda.get_device_properties(out.device).multi_processor_count)
+    grid += ar[1] if ar and not ar_sep else 0
     _run_compiled(
         launch,
         a_fp8.data_ptr(),
@@ -853,6 +1221,10 @@ def a8w4_gemm2(
         sorted_weights.data_ptr(),
         out.data_ptr(),
         int(tokens),
+        dbg.data_ptr() if dbg is not None else 0,
+        tbl.data_ptr() if tbl is not None else 0,
+        int(rank),
+        int(epoch),
         int(grid),
         torch.cuda.current_stream(),
     )
@@ -887,7 +1259,11 @@ def run_torch(
     row_expert = sorted_expert_ids.to(torch.int64).repeat_interleave(tile_m)[:nv]
     valid = token < tokens
 
-    a = a_fp8[:nv].to(torch.float32) * a_scale[:nv].view(-1, 1)
+    a = a_fp8[:nv].to(torch.float32)
+    if a_scale.dim() == 2:  # per (row, 128-K group)
+        a = (a.view(nv, -1, 128) * a_scale[:nv].view(nv, -1, 1)).view(nv, inter_dim)
+    else:
+        a = a * a_scale[:nv].view(-1, 1)
     w_scale = fp4_utils.e8m0_to_f32(w2_scale).view(E, model_dim, inter_dim // 32, 1)
     out = torch.zeros((tokens, model_dim), dtype=torch.float32, device=a.device)
     for e in row_expert[valid].unique().tolist():
@@ -902,6 +1278,17 @@ def run_torch(
 def _cos_diff(x, y):
     x, y = x.double(), y.double()
     return float(1 - 2 * (x * y).sum() / (x * x + y * y).sum())
+
+
+def quantize_groups(x, group=128):
+    """fp8 FNUZ quant with one f32 scale per (row, ``group`` columns); same formula
+    as quantize_rows / gemm1's q8 epilogues. Returns (fp8 [R, C], f32 [R, C/group])."""
+    rows, cols = x.shape
+    xg = x.float().view(rows, cols // group, group)
+    amax = xg.abs().amax(-1, keepdim=True)
+    s = torch.where(amax == 0, torch.ones_like(amax), amax / 240.0)
+    q = (xg * (1.0 / s)).clamp(-240, 240).to(torch.float8_e4m3fnuz)
+    return q.view(rows, cols), s.view(rows, cols // group).contiguous()
 
 
 @benchmark()
@@ -920,6 +1307,8 @@ def bench_a8w4_gemm2(
     waves_per_eu=None,
     epilog="lds",
     dyn_rows=False,
+    a_group=0,
+    tile_order="m",
 ):
     tile_k = 256 if inter_dim % 256 == 0 else 128
     device = "cuda"
@@ -958,7 +1347,10 @@ def bench_a8w4_gemm2(
     # Stage1 output stand-in: bf16 intermediate by sorted position, row-quantized
     # like the production path (only the num_valid_ids rows).
     inter = torch.randn((sorted_size, inter_dim), dtype=dtypes.bf16, device=device)
-    a_fp8, a_scale = quantize_rows(inter, num_valid_ids)
+    if a_group:
+        a_fp8, a_scale = quantize_groups(inter, a_group)
+    else:
+        a_fp8, a_scale = quantize_rows(inter, num_valid_ids)
 
     ref = run_torch(
         a_fp8,
@@ -1001,6 +1393,8 @@ def bench_a8w4_gemm2(
                 waves_per_eu=waves_per_eu,
                 epilog=epilog,
                 dyn_rows=dyn_rows,
+                a_group=a_group,
+                tile_order=tile_order,
             ),
         ),
         # production a16w4 port built for fp8r (baseline)
@@ -1033,6 +1427,8 @@ def bench_a8w4_gemm2(
             ),
         ),
     }
+    if a_group:  # the port only takes per-row A scales
+        del candidates["port"]
 
     routed = token * topk
     n_experts_hit = int(topk_ids.unique().numel())
@@ -1083,8 +1479,9 @@ def bench_a8w4_gemm2(
 @pytest.mark.parametrize("tile_m", [64, 32])
 @pytest.mark.parametrize("dyn_rows", [False, True])
 @pytest.mark.parametrize("routing", ROUTINGS)
+@pytest.mark.parametrize("a_group", [0, 128])
 def test_a8w4_gemm2(
-    token, model_dim, inter_dim, expert, topk, tile_m, dyn_rows, routing
+    token, model_dim, inter_dim, expert, topk, tile_m, dyn_rows, routing, a_group
 ):
     """Mimo v2.6 stage2 shape: standalone kernel and port vs fp32 reference."""
     ret = bench_a8w4_gemm2(
@@ -1096,8 +1493,9 @@ def test_a8w4_gemm2(
         routing=routing,
         tile_m=tile_m,
         dyn_rows=dyn_rows,
+        a_group=a_group,
     )
-    for name in ("a8w4_gemm2", "port"):
+    for name in ("a8w4_gemm2",) if a_group else ("a8w4_gemm2", "port"):
         assert ret[f"{name} err"] <= TOL_ERR_RATIO, f"{name} mismatch {ret}"
         assert ret[f"{name} cos"] < 1e-4, f"{name} cos diff too large {ret}"
 
@@ -1144,11 +1542,18 @@ def main():
         default=ROUTINGS,
         help="uniform: random top-k; hot: a few hot experts own most routed rows",
     )
+    parser.add_argument(
+        "--a_group",
+        type=int,
+        nargs="*",
+        default=[0],
+        help="A scale granularity: 0 = per row, 128 = per (row, 128-K group)",
+    )
     args = parser.parse_args()
 
     df = []
-    for (model_dim, inter_dim, expert, topk), token, routing, tile in (
-        itertools.product(args.shape, args.token, args.routing, args.tile)
+    for (model_dim, inter_dim, expert, topk), token, routing, tile, a_group in (
+        itertools.product(args.shape, args.token, args.routing, args.tile, args.a_group)
     ):
         tile_m, tile_n = tile[:2]
         df.append(
@@ -1162,6 +1567,7 @@ def main():
                 tile_m=tile_m,
                 tile_n=tile_n,
                 dyn_rows=bool(tile[2]) if len(tile) > 2 else False,
+                a_group=a_group,
             )
         )
     df = pd.DataFrame(df)

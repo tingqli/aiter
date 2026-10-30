@@ -13,7 +13,7 @@ import torch.distributed as dist
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kernels")
 )
-import test_a8w4_gemm2_tp as m  # noqa: E402
+import twoshot_allreduce as m  # noqa: E402
 
 
 def timeit(fn, reps=100):

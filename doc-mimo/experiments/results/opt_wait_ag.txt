@@ -1,0 +1,30 @@
+== S1 WAIT_AG=seq exit=0 bad=0 compile_err=0
+    gemm2(m)=52.3  twoshot=12.7  gemm2(m)+twoshot=65.5  ch256=75.3
+    gemm2(m)=66.0  twoshot=32.0  gemm2(m)+twoshot=102.0  ch256=90.5
+    gemm2(m)=97.4  twoshot=66.4  gemm2(m)+twoshot=164.3  ch256=135.1
+    gemm2(m)=157.7  twoshot=113.2  gemm2(m)+twoshot=281.0  ch256=226.3
+== P1 WAIT_AG=par exit=0 bad=0 compile_err=0
+    gemm2(m)=52.6  twoshot=13.0  gemm2(m)+twoshot=66.9  ch256=76.2
+    gemm2(m)=68.3  twoshot=31.2  gemm2(m)+twoshot=102.9  ch256=89.1
+    gemm2(m)=96.7  twoshot=60.9  gemm2(m)+twoshot=163.4  ch256=135.2
+    gemm2(m)=158.1  twoshot=114.3  gemm2(m)+twoshot=278.9  ch256=227.8
+== S2 WAIT_AG=seq exit=0 bad=0 compile_err=0
+    gemm2(m)=52.4  twoshot=13.8  gemm2(m)+twoshot=67.2  ch256=76.8
+    gemm2(m)=66.3  twoshot=31.7  gemm2(m)+twoshot=102.9  ch256=90.9
+    gemm2(m)=97.2  twoshot=60.0  gemm2(m)+twoshot=164.5  ch256=135.6
+    gemm2(m)=158.5  twoshot=114.3  gemm2(m)+twoshot=278.4  ch256=232.7
+== P2 WAIT_AG=par exit=0 bad=0 compile_err=0
+    gemm2(m)=51.8  twoshot=12.6  gemm2(m)+twoshot=65.3  ch256=77.6
+    gemm2(m)=66.7  twoshot=31.1  gemm2(m)+twoshot=102.1  ch256=91.4
+    gemm2(m)=97.1  twoshot=59.4  gemm2(m)+twoshot=163.3  ch256=134.9
+    gemm2(m)=159.3  twoshot=113.4  gemm2(m)+twoshot=279.9  ch256=231.0
+== S3 WAIT_AG=seq exit=0 bad=0 compile_err=0
+    gemm2(m)=52.7  twoshot=13.1  gemm2(m)+twoshot=66.5  ch256=75.5
+    gemm2(m)=66.0  twoshot=31.5  gemm2(m)+twoshot=101.2  ch256=92.3
+    gemm2(m)=99.3  twoshot=65.2  gemm2(m)+twoshot=165.9  ch256=133.3
+    gemm2(m)=159.2  twoshot=114.7  gemm2(m)+twoshot=278.6  ch256=231.1
+== P3 WAIT_AG=par exit=0 bad=0 compile_err=0
+    gemm2(m)=52.1  twoshot=12.7  gemm2(m)+twoshot=65.8  ch256=74.6
+    gemm2(m)=67.7  twoshot=31.4  gemm2(m)+twoshot=103.3  ch256=93.3
+    gemm2(m)=97.2  twoshot=61.2  gemm2(m)+twoshot=165.5  ch256=133.2
+    gemm2(m)=158.7  twoshot=114.6  gemm2(m)+twoshot=278.9  ch256=233.1

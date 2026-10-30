@@ -1,0 +1,6 @@
+tok=  128  fused c32 v1: bad=0 maxdiff=0.25  fused c32 v1 split: bad=0 maxdiff=0.25  fused c64 v1: bad=0 maxdiff=0.25  fused c64 v1 split: bad=0 maxdiff=0.25
+    gemm2(m)=52.5  gemm2(g)=54.7  twoshot=12.8  gemm2(m)+twoshot=66.7  fused c32 v1=75.8  fused c32 v1 split=74.9  fused c64 v1=73.9  fused c64 v1 split=77.0
+tok=  512  fused c32 v1: bad=0 maxdiff=0.25  fused c32 v1 split: bad=0 maxdiff=0.25  fused c64 v1: bad=0 maxdiff=0.25  fused c64 v1 split: bad=0 maxdiff=0.25
+    gemm2(m)=68.8  gemm2(g)=67.3  twoshot=32.3  gemm2(m)+twoshot=102.8  fused c32 v1=94.0  fused c32 v1 split=99.3  fused c64 v1=93.9  fused c64 v1 split=93.8
+tok= 2048  fused c32 v1: bad=0 maxdiff=0.25  fused c32 v1 split: bad=0 maxdiff=0.25  fused c64 v1: bad=0 maxdiff=0.25  fused c64 v1 split: bad=0 maxdiff=0.25
+    gemm2(m)=160.7  gemm2(g)=167.2  twoshot=113.9  gemm2(m)+twoshot=283.5  fused c32 v1=265.2  fused c32 v1 split=279.8  fused c64 v1=247.4  fused c64 v1 split=236.7

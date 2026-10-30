@@ -1,4 +1,4 @@
-# TP8 gemm2 + all-reduce (kernels/test_a8w4_gemm2_tp.py, comm/twoshot_bench.py), 8x MI300X
+# TP8 gemm2 + all-reduce (kernels/twoshot_allreduce.py, comm/twoshot_bench.py), 8x MI300X
 # shape: model_dim 4096, inter_dim 256 per rank (TP8), E 256, topk 8, uniform routing.
 # TP-test columns: slowest-rank profiler kernel time (us); err = checkAllclose mismatch
 # ratio vs fp32 reference (before and after timing).

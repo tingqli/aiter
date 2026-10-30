@@ -1,0 +1,102 @@
+== A EPI_DRAIN=0 TBL=v AR_HOOK=full exit=0 bad=0
+    gemm2(m)=52.6  twoshot=13.5  gemm2(m)+twoshot=68.0  skip ch256=56.2  ch256=78.0
+    gemm2(m)=67.4  twoshot=31.7  gemm2(m)+twoshot=102.6  skip ch256=69.5  ch256=91.4
+    gemm2(m)=98.1  twoshot=60.6  gemm2(m)+twoshot=164.8  skip ch256=103.4  ch256=132.7
+    gemm2(m)=159.2  twoshot=113.2  gemm2(m)+twoshot=278.9  skip ch256=173.5  ch256=238.0
+== B EPI_DRAIN=1 TBL=v AR_HOOK=full exit=0 bad=0
+    gemm2(m)=52.4  twoshot=13.2  gemm2(m)+twoshot=66.8  skip ch256=56.3  ch256=78.3
+    gemm2(m)=67.9  twoshot=31.3  gemm2(m)+twoshot=102.3  skip ch256=69.6  ch256=92.9
+    gemm2(m)=97.5  twoshot=60.4  gemm2(m)+twoshot=164.7  skip ch256=104.6  ch256=133.2
+    gemm2(m)=161.5  twoshot=113.3  gemm2(m)+twoshot=281.4  skip ch256=173.2  ch256=231.0
+== C EPI_DRAIN=1 TBL=s AR_HOOK=full exit=0 bad=0
+    gemm2(m)=52.3  twoshot=13.2  gemm2(m)+twoshot=68.9  skip ch256=55.5  ch256=74.6
+    gemm2(m)=66.9  twoshot=31.2  gemm2(m)+twoshot=106.1  skip ch256=70.5  ch256=90.9
+    gemm2(m)=98.6  twoshot=63.0  gemm2(m)+twoshot=166.1  skip ch256=102.5  ch256=132.7
+    gemm2(m)=159.8  twoshot=113.5  gemm2(m)+twoshot=280.2  skip ch256=172.6  ch256=232.0
+== D EPI_DRAIN=1 TBL=s AR_HOOK=wave exit=0 bad=0
+    gemm2(m)=52.3  twoshot=12.5  gemm2(m)+twoshot=66.9  skip ch256=57.0  ch256=74.7
+    gemm2(m)=67.7  twoshot=30.8  gemm2(m)+twoshot=101.4  skip ch256=68.8  ch256=90.1
+    gemm2(m)=97.8  twoshot=61.4  gemm2(m)+twoshot=164.9  skip ch256=103.0  ch256=133.6
+    gemm2(m)=160.7  twoshot=112.7  gemm2(m)+twoshot=279.7  skip ch256=173.5  ch256=228.4
+== A2 EPI_DRAIN=0 TBL=v AR_HOOK=full exit=1 bad=0
+== D2 EPI_DRAIN=1 TBL=s AR_HOOK=wave exit=0 bad=0
+    gemm2(m)=51.2  twoshot=13.3  gemm2(m)+twoshot=66.5  ch256=78.2
+    gemm2(m)=69.4  twoshot=31.5  gemm2(m)+twoshot=101.7  ch256=91.6
+    gemm2(m)=97.9  twoshot=59.8  gemm2(m)+twoshot=165.1  ch256=132.2
+    gemm2(m)=158.2  twoshot=114.0  gemm2(m)+twoshot=279.2  ch256=233.5
+== A3 EPI_DRAIN=0 TBL=v AR_HOOK=full exit=1 bad=0
+== D3 EPI_DRAIN=1 TBL=s AR_HOOK=wave exit=0 bad=0
+    gemm2(m)=52.1  twoshot=13.3  gemm2(m)+twoshot=66.1  ch256=76.3
+    gemm2(m)=66.5  twoshot=31.5  gemm2(m)+twoshot=102.5  ch256=91.1
+    gemm2(m)=98.7  twoshot=65.5  gemm2(m)+twoshot=166.1  ch256=133.1
+    gemm2(m)=160.6  twoshot=113.5  gemm2(m)+twoshot=280.6  ch256=232.6
+== [INVALID: GPUs shared with a foreign job] D4 BF16_FAST=0 WPERM=0 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=257.1  gemm2(g)=283.0  twoshot=191.4  gemm2(m)+twoshot=756.0  skip ch256=56.8  ch256=75.3
+    gemm2(m)=67.0  gemm2(g)=69.8  twoshot=32.7  gemm2(m)+twoshot=105.5  skip ch256=69.0  ch256=92.9
+    gemm2(m)=97.8  gemm2(g)=100.0  twoshot=61.4  gemm2(m)+twoshot=164.7  skip ch256=105.5  ch256=494.7
+    gemm2(m)=308.8  gemm2(g)=473.9  twoshot=350.9  gemm2(m)+twoshot=1077.2  skip ch256=517.3  ch256=844.8
+== [INVALID: GPUs shared with a foreign job] E BF16_FAST=1 WPERM=0 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=403.7  gemm2(g)=328.6  twoshot=194.4  gemm2(m)+twoshot=909.2  skip ch256=332.1  ch256=561.5
+    gemm2(m)=309.4  gemm2(g)=336.5  twoshot=228.4  gemm2(m)+twoshot=654.6  skip ch256=320.5  ch256=561.3
+    gemm2(m)=365.5  gemm2(g)=355.2  twoshot=297.7  gemm2(m)+twoshot=870.8  skip ch256=367.9  ch256=519.3
+    gemm2(m)=442.4  gemm2(g)=551.6  twoshot=365.5  gemm2(m)+twoshot=1272.9  skip ch256=622.3  ch256=839.3
+== [INVALID: GPUs shared with a foreign job] F BF16_FAST=0 WPERM=1 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=301.7  gemm2(g)=304.5  twoshot=191.8  gemm2(m)+twoshot=532.2  skip ch256=467.3  ch256=374.6
+    gemm2(m)=307.1  gemm2(g)=289.4  twoshot=233.5  gemm2(m)+twoshot=739.6  skip ch256=157.3  ch256=410.7
+    gemm2(m)=532.1  gemm2(g)=433.6  twoshot=214.4  gemm2(m)+twoshot=1233.8  skip ch256=573.7  ch256=460.7
+    gemm2(m)=289.5  gemm2(g)=460.7  twoshot=343.0  gemm2(m)+twoshot=1145.7  skip ch256=583.8  ch256=837.5
+== [INVALID: GPUs shared with a foreign job] G BF16_FAST=1 WPERM=1 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=252.9  gemm2(g)=347.0  twoshot=199.7  gemm2(m)+twoshot=695.7  skip ch256=306.3  ch256=405.4
+    gemm2(m)=322.3  gemm2(g)=347.4  twoshot=236.3  gemm2(m)+twoshot=835.5  skip ch256=376.3  ch256=434.1
+    gemm2(m)=365.1  gemm2(g)=364.0  twoshot=266.9  gemm2(m)+twoshot=924.2  skip ch256=399.0  ch256=536.6
+    gemm2(m)=540.2  gemm2(g)=505.4  twoshot=378.6  gemm2(m)+twoshot=1279.7  skip ch256=646.8  ch256=787.2
+== [INVALID: GPUs shared with a foreign job] D5 BF16_FAST=0 WPERM=0 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=291.2  gemm2(g)=303.8  twoshot=191.2  gemm2(m)+twoshot=530.1  skip ch256=257.5  ch256=444.3
+    gemm2(m)=278.7  gemm2(g)=331.4  twoshot=231.6  gemm2(m)+twoshot=943.1  skip ch256=311.5  ch256=430.2
+    gemm2(m)=491.4  gemm2(g)=391.7  twoshot=255.9  gemm2(m)+twoshot=890.8  skip ch256=368.3  ch256=554.8
+    gemm2(m)=435.4  gemm2(g)=520.8  twoshot=292.8  gemm2(m)+twoshot=1101.6  skip ch256=545.5  ch256=659.7
+== [INVALID: GPUs shared with a foreign job] G2 BF16_FAST=1 WPERM=1 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=183.2  gemm2(g)=287.6  twoshot=197.1  gemm2(m)+twoshot=687.5  skip ch256=304.9  ch256=408.0
+    gemm2(m)=306.8  gemm2(g)=302.0  twoshot=221.1  gemm2(m)+twoshot=727.9  skip ch256=327.2  ch256=628.7
+    gemm2(m)=410.4  gemm2(g)=395.5  twoshot=244.0  gemm2(m)+twoshot=849.1  skip ch256=372.8  ch256=516.3
+    gemm2(m)=487.9  gemm2(g)=576.7  twoshot=331.4  gemm2(m)+twoshot=1188.0  skip ch256=406.6  ch256=482.2
+== D4 BF16_FAST=0 WPERM=0 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=51.8  gemm2(g)=54.3  twoshot=13.0  gemm2(m)+twoshot=65.4  skip ch256=56.0  ch256=79.9
+    gemm2(m)=67.6  gemm2(g)=69.1  twoshot=31.3  gemm2(m)+twoshot=101.3  skip ch256=69.2  ch256=92.0
+    gemm2(m)=97.8  gemm2(g)=100.9  twoshot=61.8  gemm2(m)+twoshot=165.8  skip ch256=103.4  ch256=134.0
+    gemm2(m)=158.4  gemm2(g)=165.2  twoshot=115.0  gemm2(m)+twoshot=279.6  skip ch256=171.9  ch256=237.2
+== E BF16_FAST=1 WPERM=0 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=50.8  gemm2(g)=53.2  twoshot=12.6  gemm2(m)+twoshot=64.8  skip ch256=55.2  ch256=74.5
+    gemm2(m)=68.5  gemm2(g)=67.1  twoshot=31.5  gemm2(m)+twoshot=102.2  skip ch256=68.6  ch256=93.1
+    gemm2(m)=98.4  gemm2(g)=100.1  twoshot=60.8  gemm2(m)+twoshot=165.6  skip ch256=102.3  ch256=134.5
+    gemm2(m)=158.9  gemm2(g)=162.2  twoshot=112.8  gemm2(m)+twoshot=279.6  skip ch256=172.6  ch256=232.2
+== F BF16_FAST=0 WPERM=1 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=52.8  gemm2(g)=55.0  twoshot=13.0  gemm2(m)+twoshot=65.8  skip ch256=56.5  ch256=73.7
+    gemm2(m)=66.5  gemm2(g)=67.9  twoshot=31.4  gemm2(m)+twoshot=105.1  skip ch256=68.9  ch256=91.4
+    gemm2(m)=97.6  gemm2(g)=100.6  twoshot=60.8  gemm2(m)+twoshot=166.6  skip ch256=103.4  ch256=135.4
+    gemm2(m)=160.2  gemm2(g)=163.2  twoshot=114.8  gemm2(m)+twoshot=281.1  skip ch256=171.4  ch256=231.1
+== G BF16_FAST=1 WPERM=1 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=51.4  gemm2(g)=55.1  twoshot=12.9  gemm2(m)+twoshot=66.0  skip ch256=56.5  ch256=75.1
+    gemm2(m)=67.3  gemm2(g)=67.9  twoshot=31.2  gemm2(m)+twoshot=101.6  skip ch256=68.8  ch256=91.1
+    gemm2(m)=96.5  gemm2(g)=99.9  twoshot=62.6  gemm2(m)+twoshot=166.5  skip ch256=104.5  ch256=134.3
+    gemm2(m)=159.6  gemm2(g)=164.3  twoshot=114.5  gemm2(m)+twoshot=284.7  skip ch256=173.2  ch256=229.9
+== D5 BF16_FAST=0 WPERM=0 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=52.6  gemm2(g)=55.2  twoshot=12.5  gemm2(m)+twoshot=66.6  skip ch256=55.9  ch256=75.4
+    gemm2(m)=66.1  gemm2(g)=68.1  twoshot=32.1  gemm2(m)+twoshot=102.6  skip ch256=68.1  ch256=92.0
+    gemm2(m)=97.3  gemm2(g)=99.3  twoshot=60.7  gemm2(m)+twoshot=166.6  skip ch256=104.9  ch256=134.1
+    gemm2(m)=159.1  gemm2(g)=163.1  twoshot=113.1  gemm2(m)+twoshot=280.7  skip ch256=170.2  ch256=228.5
+== G2 BF16_FAST=1 WPERM=1 (D: drain, TBL=s, hook=wave) exit=0 bad=0
+    gemm2(m)=52.3  gemm2(g)=54.7  twoshot=13.0  gemm2(m)+twoshot=67.3  skip ch256=55.9  ch256=79.3
+    gemm2(m)=65.8  gemm2(g)=69.3  twoshot=31.6  gemm2(m)+twoshot=102.2  skip ch256=70.3  ch256=92.0
+    gemm2(m)=97.9  gemm2(g)=99.0  twoshot=63.6  gemm2(m)+twoshot=166.0  skip ch256=103.9  ch256=134.8
+    gemm2(m)=160.8  gemm2(g)=162.8  twoshot=113.9  gemm2(m)+twoshot=281.0  skip ch256=171.8  ch256=229.7
+== A5 EPI_DRAIN=0 TBL=v AR_HOOK=full exit=0 bad=0
+    gemm2(m)=52.2  gemm2(g)=55.1  twoshot=12.8  gemm2(m)+twoshot=65.0  ch256=76.7
+    gemm2(m)=67.3  gemm2(g)=68.8  twoshot=31.3  gemm2(m)+twoshot=102.2  ch256=90.9
+    gemm2(m)=98.4  gemm2(g)=99.5  twoshot=63.7  gemm2(m)+twoshot=165.7  ch256=130.9
+    gemm2(m)=159.9  gemm2(g)=161.5  twoshot=115.7  gemm2(m)+twoshot=284.9  ch256=237.1
+== A6 EPI_DRAIN=0 TBL=v AR_HOOK=full exit=0 bad=0
+    gemm2(m)=52.0  gemm2(g)=54.9  twoshot=12.7  gemm2(m)+twoshot=66.8  ch256=75.6
+    gemm2(m)=66.8  gemm2(g)=66.6  twoshot=31.1  gemm2(m)+twoshot=101.2  ch256=90.9
+    gemm2(m)=97.2  gemm2(g)=99.9  twoshot=63.5  gemm2(m)+twoshot=166.9  ch256=132.0
+    gemm2(m)=159.5  gemm2(g)=163.7  twoshot=114.9  gemm2(m)+twoshot=278.5  ch256=236.3

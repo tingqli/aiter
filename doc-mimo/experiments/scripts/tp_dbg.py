@@ -1,6 +1,6 @@
 import os, sys, torch, torch.distributed as dist, logging
 sys.path.insert(0, "doc-mimo/kernels")
-import test_a8w4_gemm2_tp as m
+import twoshot_allreduce as m
 import aiter
 lr = int(os.environ["LOCAL_RANK"]); torch.cuda.set_device(lr)
 dist.init_process_group("nccl", device_id=torch.device("cuda", lr))

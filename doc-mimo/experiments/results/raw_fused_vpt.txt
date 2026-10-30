@@ -1,0 +1,6 @@
+tok=  128  fused c16 v2: bad=0 maxdiff=0.25  fused c16 v4: bad=0 maxdiff=0.25  fused c32 v2: bad=0 maxdiff=0.25  fused c32 v4: bad=0 maxdiff=0.25
+    gemm2(m)=52.7  gemm2(g)=54.7  twoshot=12.4  gemm2(m)+twoshot=69.5  fused c16 v2=76.5  fused c16 v4=98.6  fused c32 v2=76.0  fused c32 v4=95.0
+tok=  512  fused c16 v2: bad=0 maxdiff=0.25  fused c16 v4: bad=0 maxdiff=0.25  fused c16 v8: bad=0 maxdiff=0.25  fused c32 v2: bad=0 maxdiff=0.25  fused c32 v4: bad=0 maxdiff=0.25  fused c32 v8: bad=0 maxdiff=0.25
+    gemm2(m)=66.6  gemm2(g)=69.7  twoshot=31.4  gemm2(m)+twoshot=105.3  fused c16 v2=103.4  fused c16 v4=114.5  fused c16 v8=155.4  fused c32 v2=94.7  fused c32 v4=113.1  fused c32 v8=154.9
+tok= 2048  fused c16 v2: bad=0 maxdiff=0.25  fused c16 v4: bad=0 maxdiff=0.25  fused c16 v8: bad=0 maxdiff=0.25  fused c32 v2: bad=0 maxdiff=0.25  fused c32 v4: bad=0 maxdiff=0.25  fused c32 v8: bad=0 maxdiff=0.25
+    gemm2(m)=158.5  gemm2(g)=166.2  twoshot=113.8  gemm2(m)+twoshot=279.9  fused c16 v2=312.4  fused c16 v4=272.7  fused c16 v8=378.1  fused c32 v2=234.9  fused c32 v4=276.1  fused c32 v8=381.7

@@ -15,8 +15,8 @@ buffers, :class:`TwoShotAllreduce`) alone (bus bandwidth in TB/s, nccl-tests
 convention), and ``gemm2+allreduce`` / ``gemm2+twoshot_ar`` back to back.
 
 Run (one process per GPU):
-    torchrun --nproc_per_node=8 op_tests/test_a8w4_gemm2_tp.py
-    torchrun --nproc_per_node=8 op_tests/test_a8w4_gemm2_tp.py -t 512 --tile 64,128,1
+    torchrun --nproc_per_node=8 op_tests/twoshot_allreduce.py
+    torchrun --nproc_per_node=8 op_tests/twoshot_allreduce.py -t 512 --tile 64,128,1
 """
 
 import argparse

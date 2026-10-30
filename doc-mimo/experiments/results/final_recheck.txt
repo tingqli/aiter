@@ -1,0 +1,162 @@
+== A1 main c64 ch256 10:31:28
+tok=  128  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=52.2  gemm2(g)=54.7  twoshot=12.6  gemm2(m)+twoshot=65.3  fused c64 v1 ch256=76.6
+tok=  256  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=55.6  gemm2(g)=58.9  twoshot=20.6  gemm2(m)+twoshot=78.9  fused c64 v1 ch256=80.7
+tok=  512  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=68.0  gemm2(g)=66.4  twoshot=32.8  gemm2(m)+twoshot=103.4  fused c64 v1 ch256=90.0
+tok= 1024  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=98.4  gemm2(g)=100.8  twoshot=60.2  gemm2(m)+twoshot=163.1  fused c64 v1 ch256=133.8
+tok= 2048  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=159.3  gemm2(g)=164.0  twoshot=113.4  gemm2(m)+twoshot=279.5  fused c64 v1 ch256=227.2
+tok= 4096  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=281.1  gemm2(g)=288.2  twoshot=247.8  gemm2(m)+twoshot=532.4  fused c64 v1 ch256=394.6
+tok= 8192  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=527.6  gemm2(g)=546.6  twoshot=468.8  gemm2(m)+twoshot=1009.0  fused c64 v1 ch256=718.1
+== A2 main c64 ch256 10:34:11
+tok=  128  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=52.1  gemm2(g)=54.7  twoshot=12.5  gemm2(m)+twoshot=65.3  fused c64 v1 ch256=74.5
+tok=  256  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=55.6  gemm2(g)=58.1  twoshot=19.2  gemm2(m)+twoshot=78.6  fused c64 v1 ch256=77.4
+tok=  512  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=67.4  gemm2(g)=67.6  twoshot=32.7  gemm2(m)+twoshot=102.8  fused c64 v1 ch256=90.3
+tok= 1024  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=98.4  gemm2(g)=100.2  twoshot=60.6  gemm2(m)+twoshot=163.9  fused c64 v1 ch256=135.7
+tok= 2048  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=159.9  gemm2(g)=163.6  twoshot=113.9  gemm2(m)+twoshot=279.5  fused c64 v1 ch256=224.7
+tok= 4096  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=283.9  gemm2(g)=287.1  twoshot=248.3  gemm2(m)+twoshot=519.5  fused c64 v1 ch256=412.2
+tok= 8192  fused c64 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=529.6  gemm2(g)=546.5  twoshot=464.8  gemm2(m)+twoshot=1016.5  fused c64 v1 ch256=725.3
+== C main c32,c128 ch256 10:36:51
+tok= 1024  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c128 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=98.0  gemm2(g)=100.0  twoshot=60.5  gemm2(m)+twoshot=164.5  fused c32 v1 ch256=132.2  fused c128 v1 ch256=135.6
+tok= 2048  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c128 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=157.7  gemm2(g)=163.1  twoshot=113.5  gemm2(m)+twoshot=279.7  fused c32 v1 ch256=240.7  fused c128 v1 ch256=247.0
+tok= 4096  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c128 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=282.8  gemm2(g)=288.4  twoshot=248.8  gemm2(m)+twoshot=536.5  fused c32 v1 ch256=441.4  fused c128 v1 ch256=462.3
+tok= 8192  fused c32 v1 ch256: bad=0 maxdiff=0.25  fused c128 v1 ch256: bad=0 maxdiff=0.25
+    gemm2(m)=527.8  gemm2(g)=541.6  twoshot=464.5  gemm2(m)+twoshot=1011.8  fused c32 v1 ch256=861.5  fused c128 v1 ch256=999.1
+== D concurrency_bound c64 10:39:34
+tok= 1024  side AR bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0
+    gemm2(m)                    97.7 us
+    gemm2(g)                    99.2 us
+    AR                          60.7 us
+    seq                        159.0 us   AR hidden    -1%
+    side g->AR                 155.8 us   AR hidden     4%
+    side AR->g                 156.6 us   AR hidden     3%
+    fused idle o=m c64          99.7 us
+    fused nodep o=m c64        137.7 us   AR hidden    34%
+    commWG c64 alone            56.5 us
+    sep nodep c64              146.5 us   AR hidden    20%
+    fused nodep o=g c64        139.2 us   AR hidden    32%
+tok= 2048  side AR bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0
+    gemm2(m)                   157.5 us
+    gemm2(g)                   164.0 us
+    AR                         111.7 us
+    seq                        269.9 us   AR hidden    -1%
+    side g->AR                 269.3 us   AR hidden    -0%
+    side AR->g                 274.5 us   AR hidden    -5%
+    fused idle o=m c64         163.7 us
+    fused nodep o=m c64        202.6 us   AR hidden    60%
+    commWG c64 alone           107.5 us
+    sep nodep c64              223.5 us   AR hidden    41%
+    fused nodep o=g c64        218.7 us   AR hidden    45%
+tok= 4096  side AR bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0
+    gemm2(m)                   282.7 us
+    gemm2(g)                   289.5 us
+    AR                         242.8 us
+    seq                        852.7 us   AR hidden  -135%
+    side g->AR                 463.1 us   AR hidden    26%
+    side AR->g                 464.0 us   AR hidden    25%
+    fused idle o=m c64         292.5 us
+    fused nodep o=m c64        337.3 us   AR hidden    78%
+    commWG c64 alone           201.6 us
+    sep nodep c64              714.7 us   AR hidden   -78%
+    fused nodep o=g c64        359.3 us   AR hidden    68%
+tok= 8192  side AR bad=0  fused o=m c64 bad=0  sep c64 bad=0  fused o=g c64 bad=0
+    gemm2(m)                   528.3 us
+    gemm2(g)                   546.8 us
+    AR                         473.0 us
+    seq                       1024.7 us   AR hidden    -5%
+    side g->AR                 839.5 us   AR hidden    34%
+    side AR->g                 853.5 us   AR hidden    31%
+    fused idle o=m c64         533.1 us
+    fused nodep o=m c64        602.3 us   AR hidden    84%
+    commWG c64 alone           575.5 us
+    sep nodep c64             1226.6 us   AR hidden   -48%
+    fused nodep o=g c64        665.1 us   AR hidden    71%
+== E fused_timeline c64 ch256 10:42:29
+tok=1024 cwg=64 vpt=1 split=0 sep=0 chunk=256 route=0 units/chunk=16 gemm2 tiles end at 101.0 us, last unit done at 118.3 us
+  chunk | final(gemm) | 1st unit start | last unit saw ready | last RS handshake | last unit done   (us from kernel start)
+      0 |        12.1 |            0.4 |                18.3 |              27.3 |            33.5
+      1 |        16.3 |            0.4 |                22.5 |              36.4 |            39.9
+      2 |        27.9 |            0.4 |                33.2 |              43.7 |            49.1
+      3 |        33.5 |            0.4 |                38.9 |              48.4 |            54.1
+      4 |        37.4 |           30.1 |                41.8 |              52.8 |            58.3
+      5 |        43.9 |           34.7 |                49.1 |              61.4 |            66.2
+      6 |        49.2 |           42.1 |                54.7 |              66.1 |            71.2
+      7 |        58.6 |           50.8 |                64.1 |              72.3 |            77.2
+      8 |        63.2 |           56.4 |                68.6 |              82.1 |            88.7
+      9 |        68.9 |           62.9 |                72.7 |              86.4 |            92.1
+     10 |        76.5 |           67.9 |                81.4 |              93.4 |            97.3
+     11 |        81.2 |           74.0 |                86.9 |             101.6 |           106.1
+     12 |        89.0 |           81.1 |                94.6 |             101.9 |           106.1
+     13 |        93.9 |           90.9 |                97.0 |             109.0 |           112.4
+     14 |        99.5 |           94.9 |               101.3 |             110.9 |           113.6
+     15 |       101.0 |          101.2 |               106.9 |             115.8 |           118.3
+tok=2048 cwg=64 vpt=1 split=0 sep=0 chunk=256 route=0 units/chunk=32 gemm2 tiles end at 181.0 us, last unit done at 206.7 us
+  chunk | final(gemm) | 1st unit start | last unit saw ready | last RS handshake | last unit done   (us from kernel start)
+      0 |        16.5 |            0.4 |                23.6 |              35.1 |            40.0
+      1 |        31.2 |            0.4 |                35.1 |              46.4 |            55.7
+      2 |        44.5 |           34.3 |                48.6 |              58.4 |            68.1
+      3 |        55.4 |           48.3 |                60.9 |              71.4 |            80.2
+      4 |        67.7 |           60.9 |                71.6 |              82.6 |            89.1
+      5 |        82.9 |           76.0 |                88.7 |              94.8 |           105.6
+      6 |        91.4 |           84.2 |                96.0 |             106.8 |           115.9
+      7 |       105.7 |           98.5 |               109.1 |             120.1 |           127.6
+      8 |       116.3 |          108.5 |               119.6 |             129.3 |           137.1
+      9 |       120.6 |          121.9 |               129.1 |             142.3 |           147.4
+     10 |       134.4 |          132.7 |               140.1 |             155.8 |           161.7
+     11 |       144.8 |          144.3 |               150.3 |             165.7 |           171.0
+     12 |       153.3 |          157.5 |               163.3 |             173.6 |           178.7
+     13 |       161.5 |          165.8 |               172.1 |             184.0 |           188.6
+     14 |       172.9 |          175.5 |               179.8 |             193.6 |           198.0
+     15 |       181.0 |          184.0 |               189.8 |             202.2 |           206.7
+tok=4096 cwg=64 vpt=1 split=0 sep=0 chunk=256 route=0 units/chunk=64 gemm2 tiles end at 351.0 us, last unit done at 397.0 us
+  chunk | final(gemm) | 1st unit start | last unit saw ready | last RS handshake | last unit done   (us from kernel start)
+      0 |        38.6 |            0.5 |                44.1 |              55.5 |            65.9
+      1 |        66.2 |           55.7 |                69.5 |              80.2 |            88.6
+      2 |        90.6 |           81.1 |                95.2 |             103.4 |           113.4
+      3 |       103.8 |          105.2 |               114.9 |             126.0 |           134.2
+      4 |       132.4 |          126.6 |               137.9 |             150.0 |           159.1
+      5 |       147.0 |          150.3 |               160.6 |             171.8 |           179.9
+      6 |       170.9 |          170.3 |               181.7 |             192.0 |           199.5
+      7 |       198.9 |          191.2 |               203.0 |             213.4 |           222.4
+      8 |       214.1 |          213.4 |               224.0 |             239.8 |           251.0
+      9 |       235.1 |          240.0 |               252.5 |             263.6 |           272.4
+     10 |       260.6 |          263.2 |               274.2 |             285.4 |           296.2
+     11 |       281.4 |          284.9 |               297.8 |             308.8 |           318.2
+     12 |       302.0 |          308.3 |               319.7 |             332.7 |           341.7
+     13 |       317.5 |          333.0 |               343.3 |             352.0 |           358.1
+     14 |       332.3 |          351.0 |               359.1 |             372.2 |           379.1
+     15 |       351.0 |          373.0 |               380.1 |             390.3 |           397.0
+tok=8192 cwg=64 vpt=1 split=0 sep=0 chunk=256 route=0 units/chunk=128 gemm2 tiles end at 635.8 us, last unit done at 737.6 us
+  chunk | final(gemm) | 1st unit start | last unit saw ready | last RS handshake | last unit done   (us from kernel start)
+      0 |        67.8 |            0.5 |                97.2 |             106.0 |           113.2
+      1 |       117.4 |          101.9 |               142.2 |             151.3 |           159.2
+      2 |       155.8 |          150.3 |               183.6 |             193.3 |           203.0
+      3 |       195.0 |          191.2 |               225.9 |             235.3 |           243.5
+      4 |       228.7 |          233.4 |               264.0 |             272.4 |           278.9
+      5 |       271.6 |          270.0 |               302.6 |             311.8 |           318.7
+      6 |       307.5 |          310.6 |               342.9 |             351.9 |           362.0
+      7 |       340.2 |          348.6 |               385.2 |             393.6 |           402.6
+      8 |       384.7 |          392.0 |               427.3 |             436.6 |           445.4
+      9 |       418.7 |          434.1 |               473.2 |             484.5 |           493.5
+     10 |       458.3 |          479.7 |               518.0 |             526.7 |           534.5
+     11 |       502.2 |          524.5 |               563.2 |             572.0 |           581.3
+     12 |       538.6 |          568.1 |               607.8 |             616.5 |           623.1
+     13 |       571.2 |          613.9 |               648.0 |             656.9 |           662.4
+     14 |       605.7 |          653.8 |               686.3 |             694.6 |           700.7
+     15 |       635.8 |          692.1 |               724.4 |             731.0 |           737.6
+== done 10:43:03

@@ -1,0 +1,40 @@
+== [INVALID: foreign job on GPUs] LLH RS_LL=1 (hint) exit=0 bad=0
+    gemm2(m)=307.3  twoshot=192.2  gemm2(m)+twoshot=805.1  ch256=606.3
+    gemm2(m)=314.7  twoshot=220.1  gemm2(m)+twoshot=1190.4  ch256=529.1
+    gemm2(m)=367.2  twoshot=384.5  gemm2(m)+twoshot=1086.3  ch256=914.2
+    gemm2(m)=656.6  twoshot=349.1  gemm2(m)+twoshot=1399.5  ch256=1053.0
+== [INVALID: foreign job on GPUs] V1 RS_LL=0 (hint) exit=0 bad=0
+    gemm2(m)=282.0  twoshot=174.9  gemm2(m)+twoshot=690.6  ch256=395.9
+    gemm2(m)=380.3  twoshot=238.7  gemm2(m)+twoshot=737.6  ch256=434.9
+    gemm2(m)=456.2  twoshot=254.1  gemm2(m)+twoshot=1010.0  ch256=687.6
+    gemm2(m)=448.3  twoshot=333.9  gemm2(m)+twoshot=964.9  ch256=726.5
+== [INVALID: foreign job on GPUs] LLH2 RS_LL=1 (hint) exit=0 bad=0
+    gemm2(m)=291.1  twoshot=179.0  gemm2(m)+twoshot=702.6  ch256=391.4
+    gemm2(m)=317.4  twoshot=229.0  gemm2(m)+twoshot=1154.8  ch256=571.3
+    gemm2(m)=388.6  twoshot=265.0  gemm2(m)+twoshot=996.1  ch256=895.0
+    gemm2(m)=464.0  twoshot=340.3  gemm2(m)+twoshot=1198.8  ch256=1184.5
+== [INVALID: foreign job on GPUs] V1b RS_LL=0 (hint) exit=0 bad=0
+    gemm2(m)=300.1  twoshot=271.3  gemm2(m)+twoshot=652.8  ch256=540.1
+    gemm2(m)=376.5  twoshot=291.2  gemm2(m)+twoshot=887.5  ch256=698.8
+    gemm2(m)=370.2  twoshot=258.5  gemm2(m)+twoshot=919.7  ch256=519.9
+    gemm2(m)=448.3  twoshot=390.9  gemm2(m)+twoshot=1342.4  ch256=878.5
+== LLH RS_LL=1 (hint) exit=0 bad=0 07:30:25
+    gemm2(m)=52.5  twoshot=12.8  gemm2(m)+twoshot=65.7  ch256=79.8
+    gemm2(m)=67.9  twoshot=31.2  gemm2(m)+twoshot=102.4  ch256=144.1
+    gemm2(m)=97.8  twoshot=61.3  gemm2(m)+twoshot=165.7  ch256=276.1
+    gemm2(m)=158.8  twoshot=113.9  gemm2(m)+twoshot=280.9  ch256=508.9
+== V1 RS_LL=0 (hint) exit=0 bad=0 07:32:59
+    gemm2(m)=51.3  twoshot=13.5  gemm2(m)+twoshot=66.1  ch256=78.2
+    gemm2(m)=67.5  twoshot=31.5  gemm2(m)+twoshot=103.0  ch256=92.9
+    gemm2(m)=98.7  twoshot=64.1  gemm2(m)+twoshot=166.3  ch256=133.9
+    gemm2(m)=157.9  twoshot=114.1  gemm2(m)+twoshot=280.2  ch256=229.8
+== LLH2 RS_LL=1 (hint) exit=0 bad=0 07:35:35
+    gemm2(m)=52.3  twoshot=12.8  gemm2(m)+twoshot=67.3  ch256=78.4
+    gemm2(m)=67.6  twoshot=31.5  gemm2(m)+twoshot=102.4  ch256=145.4
+    gemm2(m)=97.6  twoshot=60.0  gemm2(m)+twoshot=165.4  ch256=272.5
+    gemm2(m)=160.3  twoshot=115.3  gemm2(m)+twoshot=279.7  ch256=507.8
+== V1b RS_LL=0 (hint) exit=0 bad=0 07:38:10
+    gemm2(m)=51.3  twoshot=12.7  gemm2(m)+twoshot=64.6  ch256=75.0
+    gemm2(m)=67.6  twoshot=31.3  gemm2(m)+twoshot=105.7  ch256=92.0
+    gemm2(m)=97.0  twoshot=60.2  gemm2(m)+twoshot=165.9  ch256=135.7
+    gemm2(m)=158.3  twoshot=112.7  gemm2(m)+twoshot=279.6  ch256=234.0

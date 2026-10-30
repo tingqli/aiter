@@ -1,0 +1,4 @@
+tok=  512 bm=32 dyn_m=0  push bad=6518576 ({'q8push': 0, 'q8pushs': 1777171} on rank0)  q8 vs bf16: rel=0.0245 cos_diff=2.62e-04 byte_mismatch=9.13e-04 scale_mismatch=1
+    bf16=99.4us  bf16+quant=104.3us  q8=97.5us  q8+AG=130.6us  AG=34.1us  q8push+wait=120.9us  q8push=122.0us  q8pushs+wait=116.8us  q8pushs=115.2us
+tok= 2048 bm=32 dyn_m=0  push bad=26091782 ({'q8push': 16603644, 'q8pushs': 0} on rank0)  q8 vs bf16: rel=0.0245 cos_diff=2.61e-04 byte_mismatch=9.00e-04 scale_mismatch=1
+    bf16=211.9us  bf16+quant=224.1us  q8=206.8us  q8+AG=354.7us  AG=137.8us  q8push+wait=316.9us  q8push=319.9us  q8pushs+wait=265.2us  q8pushs=272.2us

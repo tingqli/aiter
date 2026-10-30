@@ -1,0 +1,20 @@
+== HELP=0 exit=0 0 compile-errors 0 bad
+    twoshot=13.6  gemm2(m)+twoshot=66.8  fused c64 v1 ch256 h0=74.4
+    twoshot=31.8  gemm2(m)+twoshot=102.5  fused c64 v1 ch256 h0=94.9
+    twoshot=59.3  gemm2(m)+twoshot=166.2  fused c64 v1 ch256 h0=137.2
+    twoshot=114.9  gemm2(m)+twoshot=282.6  fused c64 v1 ch256 h0=231.9
+== HELP=1 exit=0 0 compile-errors 0 bad
+    twoshot=12.6  gemm2(m)+twoshot=65.7  fused c64 v1 ch256 h1=76.5
+    twoshot=31.0  gemm2(m)+twoshot=103.9  fused c64 v1 ch256 h1=97.5
+    twoshot=58.0  gemm2(m)+twoshot=164.7  fused c64 v1 ch256 h1=147.9
+    twoshot=114.3  gemm2(m)+twoshot=281.9  fused c64 v1 ch256 h1=248.0
+== HELP=2 exit=0 0 compile-errors 0 bad
+    twoshot=12.7  gemm2(m)+twoshot=65.8  fused c64 v1 ch256 h2=78.9
+    twoshot=31.3  gemm2(m)+twoshot=102.2  fused c64 v1 ch256 h2=106.4
+    twoshot=62.9  gemm2(m)+twoshot=165.7  fused c64 v1 ch256 h2=153.2
+    twoshot=114.4  gemm2(m)+twoshot=281.3  fused c64 v1 ch256 h2=264.2
+== HELP=-1 exit=0 0 compile-errors 0 bad
+    twoshot=12.6  gemm2(m)+twoshot=68.5  fused c64 v1 ch256=75.5
+    twoshot=31.1  gemm2(m)+twoshot=101.4  fused c64 v1 ch256=92.1
+    twoshot=60.5  gemm2(m)+twoshot=163.4  fused c64 v1 ch256=134.5
+    twoshot=114.8  gemm2(m)+twoshot=278.2  fused c64 v1 ch256=234.5

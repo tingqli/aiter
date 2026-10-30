@@ -1,0 +1,18 @@
+HELP=0 exit=0
+tok=512 cwg=64 vpt=1 split=0 sep=0 chunk=256 help=0 units/chunk=8 gemm2 tiles end at 70.8 us, last unit done at 82.5 us
+tok=2048 cwg=64 vpt=1 split=0 sep=0 chunk=256 help=0 units/chunk=32 gemm2 tiles end at 161.5 us, last unit done at 204.4 us
+      0 |        11.2 |           18.6 |                20.6 |              32.3 |            36.4
+      7 |        38.9 |           47.2 |                48.5 |              61.1 |            65.5
+     15 |        70.8 |           74.3 |                74.5 |              80.2 |            82.5
+      0 |        15.2 |           23.5 |                25.2 |              38.9 |            46.0
+      7 |        90.8 |          106.7 |               111.3 |             124.0 |           129.7
+     15 |       161.5 |          185.0 |               190.1 |             201.1 |           204.4
+HELP=1 exit=0
+tok=512 cwg=64 vpt=1 split=0 sep=0 chunk=256 help=1 units/chunk=8 gemm2 tiles end at 76.4 us, last unit done at 89.1 us
+tok=2048 cwg=64 vpt=1 split=0 sep=0 chunk=256 help=1 units/chunk=32 gemm2 tiles end at 194.2 us, last unit done at 225.2 us
+      0 |        11.6 |           18.8 |                19.9 |              32.5 |            36.4
+      7 |        44.1 |           52.3 |                55.9 |              62.8 |            68.0
+     15 |        76.4 |           82.1 |                82.2 |              86.9 |            89.1
+      0 |        14.3 |           20.7 |                22.4 |              33.4 |            38.5
+      7 |       108.1 |          113.6 |               115.6 |             129.0 |           134.4
+     15 |       194.2 |          202.0 |               206.4 |             221.5 |           225.2
