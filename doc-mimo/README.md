@@ -28,10 +28,10 @@ doc-mimo/
     peer_store_probe.py                 # 跨卡普通 store（push）/ load（pull）带宽
     twoshot_bench.py                    # two-shot all-reduce vs RCCL，200 个 epoch 校验 + 计时
     twoshot_isa_dump.py                 # 导出 two-shot kernel 的 ISA，用于查看 fence/waitcnt
-  experiments/                          # 其余实验脚本与原始结果（见文末“实验脚本与原始结果”）
-    session_log.md                      # 按时间顺序的会话记录：每个请求、执行过的命令、分析与结论
-    scripts/                            # sweep / profiling / debug 脚本（从仓库根目录运行）
-    results/                            # 原始输出、ATT 分析、ISA dump 与资源汇总
+  experiments/                          # 全部实验：每个实验一个目录（README 先结论后细节 + 脚本 + results/）
+    README.md                           # 实验索引（按主题分组，每项一句结论）
+    tools/                              # pyhip_shim、wait_gpu_idle.sh、build_log.py
+    session_log.md                      # 早期按时间顺序的会话记录
 ```
 
 kernels/ 下的文件与 op_tests/ 中同名文件是同一时刻的快照。
@@ -68,11 +68,14 @@ torchrun --nproc_per_node=8 doc-mimo/comm/twoshot_bench.py 128 256 512 1024 2048
 | 软件流水（`pipeline`，BM≤32 时默认开启） | A-LDS 双缓冲，预取下一个 tile 的 A 和 W，用 `sched_barrier(0)` 防止预取 load 被调度器挪到循环末尾 |
 | sign-mask LUT 解码 | 去掉对 FNUZ -0 的逐片段修正 |
 | `dyn_m` | moe_sorting 固定用 64 行 block；运行时探测 `sorted_ids[bx_m+32]`，在 32 行和 64 行两种计算路径中选一个 |
+| `fast_dec=1/2`（fd1/fd2） | 权重准备时预先重排 nibble、存好每组 delta，解码 VALU −39%，结果逐位一致，详见第 7 节 |
 
 结果：512 tokens 时约 83–87 us，port 为约 113 us。
 
 - 预取加寄存器暂存在 BM≥64 时会使 VGPR 超过 168，prefill 变慢，所以只在小 M 时开启。
 - dyn_m 在 2048 tokens 时会慢约 10%，因为两种路径一起编译后 VGPR 超过 168。
+
+实验：`experiments/gemm1_config_sweep`、`gemm1_att_stats`、`isa_snapshots`。
 
 ## 2. gemm2（`test_a8w4_gemm2.py`）
 
@@ -81,8 +84,11 @@ torchrun --nproc_per_node=8 doc-mimo/comm/twoshot_bench.py 128 256 512 1024 2048
 | `epilog="lds"` | 在 MFMA 布局下先乘路由权重，结果以 bf16 暂存到 LDS（port 用 f32，这里减半），再以 128 B 连续的 `global_atomic_pk_add_bf16` 写回 |
 | `dyn_rows` | 跳过 sorted block 中全是 padding 的 16 行子块，16/32/…/BM 行的变体都编译进同一个 kernel |
 | `epilog="direct"`（保留，非默认） | 不经 LDS，lane 对之间 shuffle 后直接 atomic 写回；但每次只写 32 B 连续数据，BM≤32 时更慢 |
+| `fast_dec=1/2`（fd1/fd2） | 与 gemm1 同一套快速解码，kernel VALU −29%，结果逐位一致，详见第 7 节 |
 
 结果：128 tokens 时 37.5 us（port 83.5 us），512 tokens 时 51.6 us（port 97.8 us）。
+
+实验：`experiments/gemm2_config_sweep`、`gemm2_epilog_ablation`、`isa_snapshots`。
 
 ## 3. 端到端与单 kernel 融合
 
@@ -117,11 +123,13 @@ torchrun --nproc_per_node=8 doc-mimo/comm/twoshot_bench.py 128 256 512 1024 2048
 - 4/8 wave 的 CTA，配合 `TILE_K1=128` 实现每 CU 两个 CTA（已撤销）；
 - 用 `waves_per_eu` 强制提高占用率：寄存器溢出，慢约 2 倍。
 
+实验：`experiments/fmoe_single_kernel`。
+
 ---
 
 ## 4. 卡间通讯（TP8 下 gemm2 之后的 all-reduce）
 
-inter_dim=256 是 TP8 下每卡的切分，所以 gemm2 之后还要做 8 卡 all-reduce。`twoshot_allreduce.py` 的设定：
+inter_dim=256 是 TP8 下每卡的切分，所以 gemm2 之后还要做 8 卡 all-reduce。实验：`experiments/comm_peer_atomic`、`comm_peer_store`、`twoshot_tp_allreduce`、`quickreduce_compare`。`twoshot_allreduce.py` 的设定：
 
 - 各 rank 的路由相同，W2 和 stage-1 中间结果的分片各不相同；
 - 计时取最慢的 rank；
@@ -238,7 +246,7 @@ TP 测试（`twoshot_allreduce.py`，profiler 统计 kernel 时间，tile_m=32 �
 
 QuickReduce 的 QR-FP16 同样是 two-shot（reduce-scatter push 加 all-gather push，flag 用每次 launch 递增的颜色），原理与我们一致。但在它 README 的 8×MI300X 表中，4 MB 时 QR-FP16 为 46.8 us，RCCL 为 52.1 us，几乎没有优势；而我们的实现是 30.5 us，RCCL 为 53–67 us。
 
-下面的差异来自源码（`csrc/core/allreduce.h` 中的 `AllReduceTwoshot` 和 `TwoshotFP16LineCodec`）以及本机编译出的 8-rank FP16 kernel 的反汇编（`experiments/results/quickreduce_twoshot_fp16_w8.s`）：
+下面的差异来自源码（`csrc/core/allreduce.h` 中的 `AllReduceTwoshot` 和 `TwoshotFP16LineCodec`）以及本机编译出的 8-rank FP16 kernel 的反汇编（`experiments/quickreduce_compare/results/quickreduce_twoshot_fp16_w8.s`）：
 
 | 方面 | QuickReduce QR-FP16 | 本实现 | 影响 |
 |---|---|---|---|
@@ -266,7 +274,7 @@ QuickReduce 的 QR-FP16 同样是 two-shot（reduce-scatter push 加 all-gather 
 
 ## 5. 经验与坑
 
-- **ISA dump**：`FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/fdX`，看 `*/21_final_isa.s`，包括 `.vgpr_count`、`.vgpr_spill_count`、`.group_segment_fixed_size`。
+- **ISA dump**：`FLYDSL_DUMP_IR=1 FLYDSL_DEBUG_DUMP_ASM=1 FLYDSL_DUMP_DIR=/tmp/fdX`，看 `*/21_final_isa.s`，包括 `.vgpr_count`、`.vgpr_spill_count`、`.group_segment_fixed_size`。kernel 命中磁盘 JIT cache 时不会重新 dump，需要另给一个空的 `FLYDSL_RUNTIME_CACHE_DIR`。
 - **测量噪声**：刚 JIT 完的第一次计时偏慢，计时前先调用一次预热。单次测量有 ±3–5% 的抖动，要多轮交错取最小值。TP 测试取最慢 rank，偶尔会把单个 rank 的异常值（如 138 us）带进表里。
 - **嵌套 `@flyc.jit` 不会因 Python int 参数不同而重新特化**：尺寸要从列表长度推导。
 - **运行时控制流**：运行时的 `if` 和 `while` 必须写在 `@flyc.jit` 或 `@flyc.kernel` 函数体里（会做 AST 改写）。`range()` 只有在 jit 函数内才会生成 `scf.for`。
@@ -290,29 +298,103 @@ QuickReduce 的 QR-FP16 同样是 two-shot（reduce-scatter push 加 all-gather 
 
 ---
 
-## 实验脚本与原始结果（`experiments/`）
+## 7. fp4 解码优化 fd1/fd2：如何发现，如何实现
 
-脚本都从仓库根目录运行，已指向 `doc-mimo/kernels/`。
+**起点：** `python doc-mimo/kernels/test_a8w4_gemm1.py -s 4096,512,256,8 -t 512 -r uniform --tile 32,128,0`（inter_dim 512、512 tokens）。gemm1 只有约 2.7 TB/s，但这个 shape 预期是 memory-bound。
 
-| 脚本 | 用途 | 用法 / 备注 |
+本节用到的 9 个实验（`gemm1_power_ceiling` … `fast_decode`）列在 [experiments/README.md](experiments/README.md) 第 6 组，每个目录都有 README（先写结论，再写细节）、脚本和 `results/`。
+
+### 7.1 先确认真实上限
+
+| 测量 | 结果 | 结论 |
 |---|---|---|
-| `scripts/att_an.py` | 汇总 ATT（rocprofv3 thread trace）的 stats CSV：按指令类别统计 latency 和 stall，列出 top 指令和完整 wave 的时长 | `python att_an.py <stats_*.csv> <ui_output_dir>` |
-| `scripts/sweep.py` | gemm1 配置扫描（单次） | `python …/sweep.py "[dict(token=512, tile_m=32), …]"` |
-| `scripts/sweep2.py` | gemm1 多轮交错扫描取最小值，并断言与 port 逐位一致 | `python …/sweep2.py "[dict(token=512, tile_m=64, dyn_m=True), …]" 3` |
-| `scripts/sweep_g2.py` | gemm2 多轮交错扫描取最小值 | 同上 |
-| `scripts/prof2.py` | 融合 kernel 与 2-kernel 对比（含与 2-kernel 输出的误差） | `python …/prof2.py "[(512,'uniform'),(512,'hot')]" "[dict(), dict(block_m=16,num_waves=8)]"` |
-| `scripts/prof_fmoe.py` | 融合 kernel 计时；`skip=True` 用于只跑 gemm1 部分 | 历史脚本：`_skip_gemm2` 开关已从 kernel 中删除 |
-| `scripts/dbg_fmoe.py` | 融合 kernel 与 2-kernel 的误差分布排查（坏的行和列） | — |
-| `scripts/chk_tk.py` | `TILE_K1=128` 变体的多次运行误差对比 | 历史脚本：`tile_k1` 已撤销 |
-| `scripts/tp_dbg.py` | TP 测试逐 rank 打印 gemm2 和 all-reduce 耗时（排查 138 us 异常值） | `torchrun --nproc_per_node=8 …/tp_dbg.py` |
-| `scripts/build_log.py` | 从 Copilot 会话 transcript 重建 `session_log.md` | — |
+| 持续运行时用 `amd-smi metric` 采样（`gemm1_power_ceiling/gemm1_clock_probe.py`） | 功耗一直在 750 W 上限，gfx 时钟只有约 1.05 GHz（最高 2.1 GHz） | 整卡受功耗墙限制 |
+| 同样功耗下纯读 576 MB（`gemm1_power_ceiling/hbm_ceiling.py`） | `torch.sum` 3.62 TB/s | 在这台机器上，memory-bound 的现实上限约 3.6 TB/s，不是 5–6 TB/s |
+| 按 gemm1 的读法纯读（`gemm1_read_pattern/`） | 3.2–3.4 TB/s | gemm1 当时约达到其访存模式上限的 80% |
 
-| 结果文件 | 内容 |
-|---|---|
-| `session_log.md` | 26 个请求的完整过程：执行的命令、分析与结论（gemm1/gemm2 的扫描结果主要在这里）。transcript 不保存工具原始输出，数值以回复中的汇总为准 |
-| `results/comm_peer_atomic_probe.txt` | 跨卡 atomic 实验的原始输出 |
-| `results/comm_peer_store_probe.txt` | 跨卡 store/load 带宽：v1（按 peer 顺序，只用一条链路）和 v2（交错）的原始输出 |
-| `results/comm_tp_gemm2_allreduce.txt` | TP 测试的 RCCL 基线、逐 rank 排查、two-shot 各版本（v0/v1/light/fence/v2）及稳定性复测 |
-| `results/fmoe_prof2.txt` | 融合 kernel：写回暂存双缓冲、4/8 wave 的 CTA、`waves_per_eu`、`TILE_K1=128` 各组原始结果 |
-| `results/att/` | gemm1（bm32, xcd0）的 ATT stats CSV（dispatch 6004/6005）和 `att_an.py` 的分析输出。原始 trace 约 433 MB，未存档 |
-| `results/isa/` | 各实验 kernel 变体的最终 ISA（`21_final_isa.s`，dump 时刻的代码版本），以及 `isa_summary.txt`（VGPR、spill、LDS 汇总） |
+另外发现，ATT 每个 dispatch 的 `realtime.json` 换算出的时钟不可靠：同一 kernel 两次 trace 的 cycle 数可以相差 2 倍，比较时只能用 cycle 数。
+
+### 7.2 逐个排除的假设
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| 访存模式：每个 K-tile 读 16 段 2 KB、段间跨 32 KB，DRAM 效率低 | `gemm1_read_pattern/`：只改变连续段长度的纯读；`gemm1_tile_layout/` | 段长 2 KB 时 3.24–3.43 TB/s，≥8 KB 时 3.8–3.9 TB/s。据此实现了 `w_layout="tile"`（每个 (expert, n-block, K-tile) 一整块 32 KB 连续）：结果逐位一致，**但 kernel 时间没变** |
+| CU 数和任务分配：1024 个 WG 分到 304 个 CU 上不均匀 | `cu_scaling_bw/`：纯读时 CU 数与带宽的关系；`gemm1_cumask/`：用 stream CU mask 限制为每 XCD 32 个 CU、每个 CU 正好 4 个 WG | 纯读每 XCD 只要 10–16 个 CU 就能跑满（每 XCD 上限约 0.88 TB/s）；gemm1 限到每 XCD 32 个 CU 后**反而变慢**（192 → 210 us），说明它需要所有 CU 同时发出读请求 |
+| tail：最后一轮只剩少数 WG，并发读请求不够 | `gemm1_wave_rounds/`：改变专家数，让 grid 正好是 1/1.5/2/…/4 轮 | 1024 WG（1.68 轮）为 2.97 TB/s，其余约 3.15 TB/s，**tail 只占约 5%** |
+| W 的 cache 策略 | `gemm1_cache_modifier/`：`b_cache_mod` 0/1/2 | nt（=2）从 212 降到 197 us，已改为默认值 |
+
+结论：即使所有 CU 一直排满，稳态带宽也只有约 3.15 TB/s；瓶颈不在访存布局、CU 数和 tail。
+
+### 7.3 关键证据：ATT 显示发射口已满
+
+在 E=304 时抓 ATT（1216 个 WG，正好 2 轮，没有 tail 干扰），用 `gemm1_att_bottleneck/` 里的脚本分析：
+
+- **SIMD 发射口已占满：** 每 SIMD 2 个 wave 时，VALU 发射占用中位数 81%（p90 91%），加上 MFMA 约 9%，发射口约 90% 被占。相邻 VALU 的间隔 79% 是 4 cycle，即背靠背发射。
+- **访存等待很少：** `s_waitcnt vmcnt` 只占 wave 时间的 8.6%。
+- **加 wave 几乎不加速：** 每个 K 迭代，1 个 wave 时 3388 cycle，2 个 wave 时 3600 cycle。
+
+所以这时 gemm1 是 **VALU 发射受限**：提高 occupancy、加深预取都不会有用。
+
+K 循环每次迭代（每个 wave）有 529 条 VALU，MFMA 只有 64 条：
+
+| 来源 | 条数 | 占比 |
+|---|---|---|
+| fp4→fp8 解码：每个 dword 约 13 条，其中 6 条 `v_perm` | 约 416 | 79% |
+| ├ 其中把 even/odd 两组字节拼回 K 顺序：每个 dword 2 条 `v_perm` | 64 | 12% |
+| ├ 其中符号处理：每个 dword 2 条 `v_perm`、2 条 `v_and_or` | 128 | 24% |
+| 每个 128-K 组重建查找表：`v_sub`/`v_min`/`v_cndmask`，以及 8 条慢速的 `v_mul_lo_u32` | 约 90 | 17% |
+
+### 7.4 优化思路：权重是静态的，把能做的提前到权重准备时做
+
+| 级别 | 权重准备（每份权重做一次） | kernel 里省掉的操作 |
+|---|---|---|
+| **fd1** | `prep_w1_fast_decode`：每个 dword 内把 byte j 改存 (k_j, k_{j+4})；nibble 0x8（-0）改成 0 | 拼回 K 顺序的 2 条 `v_perm`。在 flush_tiny 下，非零数值不会被查成 0，于是符号可以直接用位运算加上：`even = ((raw<<4) & smask) \| perm(...)`、`odd = (raw & smask) \| perm(...)`，省掉 2 条符号 `v_perm` 和符号表的构建 |
+| **fd2** | 再加 `prep_w1_predelta`：scale 字节改存 `min(通道最大值 − 组内 scale, 11)×8`；会被 flush 成 0 的组，直接在 W 里写 0 | 查找表只剩：1 条 `v_perm` 把 delta 广播到 4 个字节，再做 `sub`/`and`/`sub`。不再需要 `v_min`、`v_cndmask` 和慢速的 `v_mul_lo` |
+
+实现要点：
+
+- **直接在标准 preshuffle 布局上改写**，不用先 unshuffle：
+  - W 字节按 `(N/16, K/128, klane 4, nlane 16, 16 B)` 排列，每 16 B 是第 `kg = k128*4 + klane` 个 32-K 组、第 `n16*16 + nlane` 列；
+  - scale 字节按 `(N/32, K/256, klane, nlane, kpack 2, npack 2)` 排列。
+  - 准备函数会断言由此换算出的每通道最大值与 `channel_exponents` 一致，用来校验映射。
+- **gemm2（`prep_w2_fast`）：** gemm2 原本在 kernel 内部从 scale 求出每通道最大值；fd2 改写 scale 后求不出来了，所以把这些最大值（int32）接在 scale 数据后面，kernel 从 `arg_w_scale + WS_BYTES` 读取，不用改 kernel 参数表。
+- **生产路径：** `test_flydsl_moe_a16wfp4.a8w4_prepare_weights(..., fast_dec=2)`（默认）同时处理 W1 和 W2，`a8w4_fused_moe` 根据 `w1_fast_dec` / `w2_fast_dec` 选择解码方式。处理过的权重只能给这两个 kernel 用，port、CK 等路径不能读。
+- **正确性：**
+  - gemm1：fd1、fd2 与原解码、与 port 都逐位一致（pytest 断言）；
+  - gemm2：用原子加累加，topk>1 时输出本身不完全可复现，所以用 topk=1（每个输出元素只被加一次）验证逐位一致；
+  - 端到端：fd0 与 fd0 连跑两次 cos 差就有约 3e-6，所以用 cos < 1e-4 断言。
+
+### 7.5 效果
+
+ISA（`fast_decode/isa_dump.sh`）：
+
+| | 原版 | fd1 | fd2 |
+|---|---|---|---|
+| gemm1 K 循环 VALU（每迭代每个 wave） | 531 | 379 | **325（−39%）** |
+| gemm2 整个 kernel 的 VALU / VGPR | 719 / 80 | 568 / 80 | **509 / 74** |
+
+时间（单位 us；gemm1/gemm2 为 inter_dim 512、bm32；端到端为 test_flydsl_moe_a16wfp4 的 bm32）：
+
+| | 原版 | fd2 |
+|---|---|---|
+| gemm1，512 tokens | 191.6–198.8 | 169.4–179.0 |
+| gemm2，512 tokens（bm64，dyn_rows） | 108.6 | 96.7 |
+| gemm2，2048 tokens（bm64） | 222.0 | 192.7 |
+| 端到端，128 / 512 / 2048 tokens | 170.6 / 193.9 / 369.5 | **153.2 / 175.8 / 340.7** |
+
+端到端快了 8–10%，比现有 `fused_moe` 快 1.37–1.74 倍。
+
+**为什么 VALU 少了 39%，时间只少约 10%：** fd2 跑起来功耗仍是 750 W，时钟从约 1.09 降到约 1.04 GHz。计算变快后，单位时间搬运的数据更多，访存功耗随之上升，瓶颈从「VALU 发射」变成了「功耗墙」。此时 gemm1 约 3.3 TB/s，已是同样功耗下纯读（3.6 TB/s）的约 90%。
+
+### 7.6 经验
+
+1. **先在实际条件下测上限，再谈 kernel 达到多少比例。** 拿峰值规格比，会误判成「带宽只用了一半」。
+2. **每个假设单独设计实验验证。** 访存布局、CU 数、tail 这三个看似合理的方向都被数据否定了；tile 布局虽然做出来了，但没有收益。
+3. **判断计算还是访存瓶颈，最有用的指标是「每 SIMD 在跑 N 个 wave 时的 VALU 发射占用」和「增加 wave 后单次迭代时间变不变」**。只看指令条数会误判：`moe-new-tp.md` 第 11 节在 TP8 shape 上删掉约 7% VALU 没有收益；这次在 inter_dim 512 的 shape 上发射口已饱和，删掉 39% 就有收益。
+4. **权重是静态的，凡是只依赖权重的计算都可以挪到准备阶段**，包括字节顺序、符号规范化、scale 的相对值和 flush 判断，只要保证结果逐位一致。
+
+---
+
+## 实验目录
+
+所有实验（脚本、原始结果、每个实验的结论与细节）都按实验分目录放在 `experiments/` 下，索引见 [experiments/README.md](experiments/README.md)。

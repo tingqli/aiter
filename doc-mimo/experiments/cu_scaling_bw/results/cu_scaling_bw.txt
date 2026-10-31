@@ -1,0 +1,57 @@
+A 8xcd    XCD=8 CU/XCD= 1 total CU=  8 thr=1024 unroll= 4 dyn=1:  0.66 TB/s ( 3237.5 us)  placed on 8 CUs / 8 XCDs, CUs per SE 1-1 over 8 SEs
+A 8xcd    XCD=8 CU/XCD= 2 total CU= 16 thr=1024 unroll= 4 dyn=1:  1.29 TB/s ( 1659.1 us)  placed on 16 CUs / 8 XCDs, CUs per SE 1-1 over 16 SEs
+A 8xcd    XCD=8 CU/XCD= 3 total CU= 24 thr=1024 unroll= 4 dyn=1:  1.89 TB/s ( 1135.6 us)  placed on 24 CUs / 8 XCDs, CUs per SE 1-1 over 24 SEs
+A 8xcd    XCD=8 CU/XCD= 4 total CU= 32 thr=1024 unroll= 4 dyn=1:  2.42 TB/s (  887.5 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+A 8xcd    XCD=8 CU/XCD= 5 total CU= 40 thr=1024 unroll= 4 dyn=1:  2.87 TB/s (  748.3 us)  placed on 40 CUs / 8 XCDs, CUs per SE 1-2 over 32 SEs
+A 8xcd    XCD=8 CU/XCD= 6 total CU= 48 thr=1024 unroll= 4 dyn=1:  3.20 TB/s (  670.1 us)  placed on 48 CUs / 8 XCDs, CUs per SE 1-2 over 32 SEs
+A 8xcd    XCD=8 CU/XCD= 8 total CU= 64 thr=1024 unroll= 4 dyn=1:  3.64 TB/s (  590.3 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=10 total CU= 80 thr=1024 unroll= 4 dyn=1:  3.88 TB/s (  552.8 us)  placed on 80 CUs / 8 XCDs, CUs per SE 2-3 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=12 total CU= 96 thr=1024 unroll= 4 dyn=1:  3.94 TB/s (  545.3 us)  placed on 96 CUs / 8 XCDs, CUs per SE 3-3 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=14 total CU=112 thr=1024 unroll= 4 dyn=1:  3.98 TB/s (  538.9 us)  placed on 112 CUs / 8 XCDs, CUs per SE 3-4 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=16 total CU=128 thr=1024 unroll= 4 dyn=1:  3.98 TB/s (  538.9 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=20 total CU=160 thr=1024 unroll= 4 dyn=1:  3.96 TB/s (  541.8 us)  placed on 160 CUs / 8 XCDs, CUs per SE 5-5 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=24 total CU=192 thr=1024 unroll= 4 dyn=1:  3.92 TB/s (  548.1 us)  placed on 192 CUs / 8 XCDs, CUs per SE 6-6 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=32 total CU=256 thr=1024 unroll= 4 dyn=1:  3.92 TB/s (  548.3 us)  placed on 256 CUs / 8 XCDs, CUs per SE 8-8 over 32 SEs
+A 8xcd    XCD=8 CU/XCD=38 total CU=304 thr=1024 unroll= 4 dyn=1:  3.88 TB/s (  553.9 us)  placed on 304 CUs / 8 XCDs, CUs per SE 9-10 over 32 SEs
+A' static XCD=8 CU/XCD= 2 total CU= 16 thr=1024 unroll= 4 dyn=0:  1.27 TB/s ( 1692.3 us)  placed on 16 CUs / 8 XCDs, CUs per SE 1-1 over 16 SEs
+A' static XCD=8 CU/XCD= 3 total CU= 24 thr=1024 unroll= 4 dyn=0:  1.30 TB/s ( 1657.5 us)  placed on 24 CUs / 8 XCDs, CUs per SE 1-1 over 24 SEs
+A' static XCD=8 CU/XCD= 4 total CU= 32 thr=1024 unroll= 4 dyn=0:  2.36 TB/s (  911.1 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+A' static XCD=8 CU/XCD= 6 total CU= 48 thr=1024 unroll= 4 dyn=0:  2.39 TB/s (  897.1 us)  placed on 48 CUs / 8 XCDs, CUs per SE 1-2 over 32 SEs
+A' static XCD=8 CU/XCD= 8 total CU= 64 thr=1024 unroll= 4 dyn=0:  3.73 TB/s (  575.3 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+A' static XCD=8 CU/XCD=16 total CU=128 thr=1024 unroll= 4 dyn=0:  3.95 TB/s (  543.6 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs
+A' static XCD=8 CU/XCD=38 total CU=304 thr=1024 unroll= 4 dyn=0:  3.73 TB/s (  575.9 us)  placed on 304 CUs / 8 XCDs, CUs per SE 9-10 over 32 SEs
+B xcd     XCD=1 CU/XCD=38 total CU= 38 thr=1024 unroll= 4 dyn=1:  0.88 TB/s ( 2441.2 us)  placed on 38 CUs / 1 XCDs, CUs per SE 9-10 over 4 SEs
+B xcd     XCD=2 CU/XCD=38 total CU= 76 thr=1024 unroll= 4 dyn=1:  1.56 TB/s ( 1374.7 us)  placed on 76 CUs / 2 XCDs, CUs per SE 9-10 over 8 SEs
+B xcd     XCD=3 CU/XCD=38 total CU=114 thr=1024 unroll= 4 dyn=1:  2.36 TB/s (  908.4 us)  placed on 114 CUs / 3 XCDs, CUs per SE 9-10 over 12 SEs
+B xcd     XCD=4 CU/XCD=38 total CU=152 thr=1024 unroll= 4 dyn=1:  3.03 TB/s (  708.9 us)  placed on 152 CUs / 4 XCDs, CUs per SE 9-10 over 16 SEs
+B xcd     XCD=5 CU/XCD=38 total CU=190 thr=1024 unroll= 4 dyn=1:  3.55 TB/s (  604.1 us)  placed on 190 CUs / 5 XCDs, CUs per SE 9-10 over 20 SEs
+B xcd     XCD=6 CU/XCD=38 total CU=228 thr=1024 unroll= 4 dyn=1:  3.73 TB/s (  575.5 us)  placed on 228 CUs / 6 XCDs, CUs per SE 9-10 over 24 SEs
+B xcd     XCD=7 CU/XCD=38 total CU=266 thr=1024 unroll= 4 dyn=1:  3.90 TB/s (  550.6 us)  placed on 266 CUs / 7 XCDs, CUs per SE 9-10 over 28 SEs
+B xcd     XCD=1 CU/XCD= 8 total CU=  8 thr=1024 unroll= 4 dyn=1:  0.66 TB/s ( 3269.4 us)  placed on 8 CUs / 1 XCDs, CUs per SE 2-2 over 4 SEs
+B xcd     XCD=1 CU/XCD=16 total CU= 16 thr=1024 unroll= 4 dyn=1:  0.88 TB/s ( 2452.9 us)  placed on 16 CUs / 1 XCDs, CUs per SE 4-4 over 4 SEs
+B xcd     XCD=4 CU/XCD=16 total CU= 64 thr=1024 unroll= 4 dyn=1:  2.96 TB/s (  724.4 us)  placed on 64 CUs / 4 XCDs, CUs per SE 4-4 over 16 SEs
+B xcd     XCD=6 CU/XCD=16 total CU= 96 thr=1024 unroll= 4 dyn=1:  3.79 TB/s (  567.3 us)  placed on 96 CUs / 6 XCDs, CUs per SE 4-4 over 24 SEs
+C mlp     XCD=8 CU/XCD= 1 total CU=  8 thr= 256 unroll= 4 dyn=1:  0.23 TB/s ( 9473.5 us)  placed on 8 CUs / 8 XCDs, CUs per SE 1-1 over 8 SEs
+C mlp     XCD=8 CU/XCD= 1 total CU=  8 thr= 256 unroll=16 dyn=1:  0.42 TB/s ( 5154.3 us)  placed on 8 CUs / 8 XCDs, CUs per SE 1-1 over 8 SEs
+C mlp     XCD=8 CU/XCD= 1 total CU=  8 thr= 512 unroll= 4 dyn=1:  0.43 TB/s ( 4946.4 us)  placed on 8 CUs / 8 XCDs, CUs per SE 1-1 over 8 SEs
+C mlp     XCD=8 CU/XCD= 1 total CU=  8 thr= 512 unroll=16 dyn=1:  0.62 TB/s ( 3452.6 us)  placed on 8 CUs / 8 XCDs, CUs per SE 1-1 over 8 SEs
+C mlp     XCD=8 CU/XCD= 1 total CU=  8 thr=1024 unroll= 4 dyn=1:  0.66 TB/s ( 3238.2 us)  placed on 8 CUs / 8 XCDs, CUs per SE 1-1 over 8 SEs
+C mlp     XCD=8 CU/XCD= 1 total CU=  8 thr=1024 unroll=16 dyn=1:  0.64 TB/s ( 3357.3 us)  placed on 8 CUs / 8 XCDs, CUs per SE 1-1 over 8 SEs
+C mlp     XCD=8 CU/XCD= 4 total CU= 32 thr= 256 unroll= 4 dyn=1:  0.89 TB/s ( 2419.2 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+C mlp     XCD=8 CU/XCD= 4 total CU= 32 thr= 256 unroll=16 dyn=1:  1.61 TB/s ( 1335.8 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+C mlp     XCD=8 CU/XCD= 4 total CU= 32 thr= 512 unroll= 4 dyn=1:  1.67 TB/s ( 1288.0 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+C mlp     XCD=8 CU/XCD= 4 total CU= 32 thr= 512 unroll=16 dyn=1:  2.30 TB/s (  933.5 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+C mlp     XCD=8 CU/XCD= 4 total CU= 32 thr=1024 unroll= 4 dyn=1:  2.42 TB/s (  887.8 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+C mlp     XCD=8 CU/XCD= 4 total CU= 32 thr=1024 unroll=16 dyn=1:  2.33 TB/s (  919.8 us)  placed on 32 CUs / 8 XCDs, CUs per SE 1-1 over 32 SEs
+C mlp     XCD=8 CU/XCD= 8 total CU= 64 thr= 256 unroll= 4 dyn=1:  1.72 TB/s ( 1251.5 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+C mlp     XCD=8 CU/XCD= 8 total CU= 64 thr= 256 unroll=16 dyn=1:  2.87 TB/s (  747.3 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+C mlp     XCD=8 CU/XCD= 8 total CU= 64 thr= 512 unroll= 4 dyn=1:  2.91 TB/s (  738.6 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+C mlp     XCD=8 CU/XCD= 8 total CU= 64 thr= 512 unroll=16 dyn=1:  3.54 TB/s (  607.4 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+C mlp     XCD=8 CU/XCD= 8 total CU= 64 thr=1024 unroll= 4 dyn=1:  3.60 TB/s (  596.2 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+C mlp     XCD=8 CU/XCD= 8 total CU= 64 thr=1024 unroll=16 dyn=1:  3.52 TB/s (  610.1 us)  placed on 64 CUs / 8 XCDs, CUs per SE 2-2 over 32 SEs
+C mlp     XCD=8 CU/XCD=16 total CU=128 thr= 256 unroll= 4 dyn=1:  2.96 TB/s (  724.6 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs
+C mlp     XCD=8 CU/XCD=16 total CU=128 thr= 256 unroll=16 dyn=1:  3.99 TB/s (  538.0 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs
+C mlp     XCD=8 CU/XCD=16 total CU=128 thr= 512 unroll= 4 dyn=1:  3.96 TB/s (  542.1 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs
+C mlp     XCD=8 CU/XCD=16 total CU=128 thr= 512 unroll=16 dyn=1:  3.91 TB/s (  549.3 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs
+C mlp     XCD=8 CU/XCD=16 total CU=128 thr=1024 unroll= 4 dyn=1:  4.00 TB/s (  537.1 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs
+C mlp     XCD=8 CU/XCD=16 total CU=128 thr=1024 unroll=16 dyn=1:  3.87 TB/s (  555.5 us)  placed on 128 CUs / 8 XCDs, CUs per SE 4-4 over 32 SEs

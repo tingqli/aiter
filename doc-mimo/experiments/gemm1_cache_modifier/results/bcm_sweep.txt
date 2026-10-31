@@ -1,0 +1,5 @@
+cfg tn128 bcm1: standalone 210.3 us 2.74 TB/s err 0 | port 231.0 us 2.50 TB/s
+cfg tn128 bcm0: standalone 213.8 us 2.70 TB/s err 0 | port 233.2 us 2.47 TB/s
+cfg tn128 bcm2: standalone 195.7 us 2.95 TB/s err 0 | port 211.5 us 2.73 TB/s
+cfg tn64 bcm1: standalone 213.5 us 2.70 TB/s err 0 | port 246.0 us 2.34 TB/s
+cfg tn64 bcm2: standalone 191.8 us 3.01 TB/s err 0 | port 213.5 us 2.70 TB/s

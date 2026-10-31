@@ -1,0 +1,4 @@
+gemm1  num_warps=4:   164.0 us   3.27 TB/s
+contig num_warps=4:   137.4 us   3.91 TB/s
+gemm1  num_warps=8:   151.5 us   3.54 TB/s
+contig num_warps=8:   131.2 us   4.09 TB/s

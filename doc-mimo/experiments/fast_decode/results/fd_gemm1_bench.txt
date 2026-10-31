@@ -1,0 +1,6 @@
+cfg rep0 E256 tok512 tn128: std 197.1 | tile 194.4 | fd1 179.4 | fd2 174.2 us (3.31 TB/s) | port 209.0 | bitexact tile True fd1 True fd2 True
+cfg rep0 E256 tok512 tn64: std 191.9 | tile 193.9 | fd1 184.6 | fd2 180.3 us (3.20 TB/s) | port 216.1 | bitexact tile True fd1 True fd2 True
+cfg rep0 E304 tok608 tn128: std 221.1 | tile 225.4 | fd1 208.9 | fd2 205.8 us (3.33 TB/s) | port 228.4 | bitexact tile True fd1 True fd2 True
+cfg rep1 E256 tok512 tn128: std 193.4 | tile 205.6 | fd1 198.7 | fd2 174.4 us (3.31 TB/s) | port 210.6 | bitexact tile True fd1 True fd2 True
+cfg rep1 E256 tok512 tn64: std 187.3 | tile 200.8 | fd1 192.1 | fd2 177.0 us (3.26 TB/s) | port 215.0 | bitexact tile True fd1 True fd2 True
+cfg rep1 E304 tok608 tn128: std 210.7 | tile 229.5 | fd1 221.3 | fd2 215.1 us (3.18 TB/s) | port 231.7 | bitexact tile True fd1 True fd2 True

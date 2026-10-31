@@ -82,20 +82,37 @@ def _a8w4_kernels():
     return a8w4_gemm1, a8w4_gemm2
 
 
-def a8w4_prepare_weights(w1, w2, w1_scale, w2_scale):
+def a8w4_prepare_weights(w1, w2, w1_scale, w2_scale, fast_dec=2):
     """Weight-static prep (cached per weight in production): u8 views of the
     standard-preshuffled mxfp4 W1/W2 + e8m0 scales and W1's per-channel max
-    e8m0 exponent. W2's exponent is derived inside gemm2."""
+    e8m0 exponent. W2's exponent is derived inside gemm2 (fast_dec < 2).
+
+    ``fast_dec`` (1/2, 0 = off): W1 / W2 and their scales are rewritten for the
+    fast fp4 decode of gemm1 / gemm2 (``prep_w1_fast`` / ``prep_w2_fast``: nibble
+    reorder + no -0; 2 also stores the per-group scale delta and zeroes flushed
+    groups, W2's scale buffer then carries its channel max codes). Bit-exact vs 0."""
     from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import channel_exponents
 
     w1_u8 = w1.view(torch.uint8)
     w1_scale_u8 = w1_scale.view(torch.uint8).contiguous().view(-1)
+    w2_u8 = w2.view(torch.uint8)
+    w2_scale_u8 = w2_scale.view(torch.uint8).contiguous().view(-1)
+    w1_exp = channel_exponents(w1_u8, w1_scale_u8)  # from the original scales
+    if fast_dec:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from test_a8w4_gemm1 import prep_w1_fast
+        from test_a8w4_gemm2 import prep_w2_fast
+
+        w1_u8, w1_scale_u8 = prep_w1_fast(w1_u8, w1_scale_u8, w1_exp, fast_dec)
+        w2_u8, w2_scale_u8 = prep_w2_fast(w2_u8, w2_scale_u8, fast_dec)
     return dict(
         w1=w1_u8,
-        w2=w2.view(torch.uint8),
+        w2=w2_u8,
         w1_scale=w1_scale_u8,
-        w2_scale=w2_scale.view(torch.uint8).contiguous().view(-1),
-        w1_exp=channel_exponents(w1_u8, w1_scale_u8),
+        w2_scale=w2_scale_u8,
+        w1_exp=w1_exp,
+        w1_fast_dec=int(fast_dec),
+        w2_fast_dec=int(fast_dec),
     )
 
 
@@ -113,6 +130,8 @@ def a8w4_fused_moe(
 
     a8w4_gemm1, a8w4_gemm2 = _a8w4_kernels()
     g1_cfg, g2_cfg = A8W4_E2E_CFGS[block_m]
+    g1_cfg = dict(g1_cfg, fast_dec=weights.get("w1_fast_dec", 0))
+    g2_cfg = dict(g2_cfg, fast_dec=weights.get("w2_fast_dec", 0))
     E, model_dim, _ = weights["w2"].shape
     inter_dim = weights["w1"].shape[1] // 2
 
@@ -378,28 +397,36 @@ def test_flydsl_a16wfp4_silu_e2e(
     # ---- standalone A8W4 gemm1+gemm2 pipeline vs the fused_moe selection above ----
     if get_gfx() != "gfx942":
         return
-    weights = a8w4_prepare_weights(w1_gui, w2_gui, w1_scale_gui, w2_scale_gui)
+    weights = {fd: a8w4_prepare_weights(w1_gui, w2_gui, w1_scale_gui, w2_scale_gui,
+                                        fast_dec=fd) for fd in (0, 2)}
     print(f"  fused_moe (current selection): {avg_us:8.2f} us  cos_diff={ld:.3e}")
     for block_m, fuse_quant in itertools.product(A8W4_E2E_CFGS, (False, True)):
-        # JIT-compile outside the timed region.
-        a8w4_fused_moe(
-            inp, weights, topk_weights, topk_ids, block_m=block_m, fuse_quant=fuse_quant
-        )
-        torch.cuda.synchronize()
-        out_new, us_new = run_perftest(
-            a8w4_fused_moe,
-            inp,
-            weights,
-            topk_weights,
-            topk_ids,
-            block_m=block_m,
-            fuse_quant=fuse_quant,
-        )
-        tag = f"bm{block_m}{' fused-quant' if fuse_quant else ''}"
-        assert not out_new.isnan().any().item(), f"a8w4 {tag} output has NaN"
-        ld_new = _cos_diff(ref.float(), out_new.float())
-        print(
-            f"  a8w4 standalone {tag:<16}: {us_new:8.2f} us  "
-            f"cos_diff={ld_new:.3e}  speedup={avg_us / us_new:.2f}x"
-        )
-        assert ld_new < 1e-2, f"a8w4 {tag} cos/logits_diff too large: {ld_new:.3e}"
+        outs = {}
+        for fd, wts in weights.items():
+            # JIT-compile outside the timed region.
+            a8w4_fused_moe(
+                inp, wts, topk_weights, topk_ids, block_m=block_m, fuse_quant=fuse_quant
+            )
+            torch.cuda.synchronize()
+            out_new, us_new = run_perftest(
+                a8w4_fused_moe,
+                inp,
+                wts,
+                topk_weights,
+                topk_ids,
+                block_m=block_m,
+                fuse_quant=fuse_quant,
+            )
+            outs[fd] = out_new.clone()
+            tag = f"bm{block_m}{' fused-quant' if fuse_quant else ''} fd{fd}"
+            assert not out_new.isnan().any().item(), f"a8w4 {tag} output has NaN"
+            ld_new = _cos_diff(ref.float(), out_new.float())
+            print(
+                f"  a8w4 standalone {tag:<20}: {us_new:8.2f} us  "
+                f"cos_diff={ld_new:.3e}  speedup={avg_us / us_new:.2f}x"
+            )
+            assert ld_new < 1e-2, f"a8w4 {tag} cos/logits_diff too large: {ld_new:.3e}"
+        # gemm1 fast decode is bit-exact (test_a8w4_gemm1.py); the e2e output is not
+        # deterministic run to run (gemm2 bf16 atomic order: fd0 vs fd0 ~3e-6), so
+        # bound the difference well below the A8W4 error (~1e-3) instead.
+        assert _cos_diff(outs[0].float(), outs[2].float()) < 1e-4, "fast_dec diverged"

@@ -1,0 +1,33 @@
+# pytest test_a8w4_gemm1.py -k silu
+6 passed, 2 warnings in 12.65s
+# pytest test_a8w4_gemm2.py
+16 passed, 2 warnings in 13.35s
+# pytest -s test_flydsl_moe_a16wfp4.py (e2e, a8w4_fused_moe fd0 vs fd2; tokens 128 / 512 / 2048)
+  fused_moe (current selection):   214.36 us
+  a8w4 standalone bm32 fd0            :   166.47 us  speedup=1.29x
+  a8w4 standalone bm32 fd2            :   153.94 us  speedup=1.39x
+  a8w4 standalone bm32 fused-quant fd0:   166.46 us  speedup=1.29x
+  a8w4 standalone bm32 fused-quant fd2:   152.86 us  speedup=1.40x
+  a8w4 standalone bm64 fd0            :   177.42 us  speedup=1.21x
+  a8w4 standalone bm64 fd2            :   158.48 us  speedup=1.35x
+  a8w4 standalone bm64 fused-quant fd0:   166.71 us  speedup=1.29x
+  a8w4 standalone bm64 fused-quant fd2:   153.37 us  speedup=1.40x
+  fused_moe (current selection):   282.83 us
+  a8w4 standalone bm32 fd0            :   193.03 us  speedup=1.47x
+  a8w4 standalone bm32 fd2            :   179.57 us  speedup=1.58x
+  a8w4 standalone bm32 fused-quant fd0:   190.80 us  speedup=1.48x
+  a8w4 standalone bm32 fused-quant fd2:   178.14 us  speedup=1.59x
+  a8w4 standalone bm64 fd0            :   194.90 us  speedup=1.45x
+  a8w4 standalone bm64 fd2            :   184.41 us  speedup=1.53x
+  a8w4 standalone bm64 fused-quant fd0:   192.27 us  speedup=1.47x
+  a8w4 standalone bm64 fused-quant fd2:   180.34 us  speedup=1.57x
+  fused_moe (current selection):   592.54 us
+  a8w4 standalone bm32 fd0            :   379.65 us  speedup=1.56x
+  a8w4 standalone bm32 fd2            :   338.14 us  speedup=1.75x
+  a8w4 standalone bm32 fused-quant fd0:   386.56 us  speedup=1.53x
+  a8w4 standalone bm32 fused-quant fd2:   343.38 us  speedup=1.73x
+  a8w4 standalone bm64 fd0            :   393.97 us  speedup=1.50x
+  a8w4 standalone bm64 fd2            :   360.02 us  speedup=1.65x
+  a8w4 standalone bm64 fused-quant fd0:   388.20 us  speedup=1.53x
+  a8w4 standalone bm64 fused-quant fd2:   370.24 us  speedup=1.60x
+3 passed, 2 warnings in 18.12s

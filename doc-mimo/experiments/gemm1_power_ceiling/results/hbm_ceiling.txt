@@ -1,0 +1,4 @@
+read  576 MB (torch.sum):
+    167.1 us   3.62 TB/s   power 579 W  gfx clk 1502 MHz  (3 samples)
+copy  576 MB -> 576 MB (bytes = read + write):
+    334.9 us   3.61 TB/s   power 751 W  gfx clk 1275 MHz  (3 samples)

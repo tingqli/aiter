@@ -1,0 +1,3 @@
+chk I512 bm32 topk1: fd1==std True fd2==std True
+chk I512 bm64 topk1: fd1==std True fd2==std True
+chk I256 bm32 topk1: fd1==std True fd2==std True

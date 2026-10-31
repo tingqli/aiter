@@ -120,7 +120,7 @@ AITER_CONFIG_FMOE=$PWD/mimo_v2.6_flash_a8w4_tuned_fmoe.csv \
   pytest -s doc-mimo/kernels/test_flydsl_moe_a16wfp4.py::test_flydsl_a16wfp4_silu_e2e
 ```
 
-（上面的命令若遇到 `pyhip.contrib` 导入失败，前面加 `PYTHONPATH=$PWD/doc-mimo/experiments/scripts/pyhip_shim`。）
+（上面的命令若遇到 `pyhip.contrib` 导入失败，前面加 `PYTHONPATH=$PWD/doc-mimo/experiments/tools/pyhip_shim`。）
 
 ==================================================================================
 ## gemm2 + all-reduce 融合（参考 mega_moe_tp）
@@ -151,7 +151,7 @@ AITER_CONFIG_FMOE=$PWD/mimo_v2.6_flash_a8w4_tuned_fmoe.csv \
 - **列扫描靠调度顺序实现**（tile order `g`）：
   - 输出按 `CHUNK_N` 列分成若干 chunk，grid 按 chunk 顺序发射；
   - 每个 chunk 内部是 m-major，并保留按 XCD 连续分配的映射以维持 cache 局部性。
-  - 探针结果（`experiments/results/g2_order_probe.txt`）：
+  - 探针结果（`experiments/gemm2_tile_order/results/g2_order_probe.txt`）：
 
     | tile 顺序 | 8 个 512 列 chunk 完成时刻（占 kernel 时长的 %） | gemm2 代价 |
     |---|---|---|
@@ -183,7 +183,7 @@ AITER_CONFIG_FMOE=$PWD/mimo_v2.6_flash_a8w4_tuned_fmoe.csv \
 | peer 基址用 SGPR，计数器改为 lane 并行轮询 | 91–92 | VGPR 从 98 降到 78 |
 | `CHUNK_N` = 256 / 512 / 1024，`cwg` = 32 / 64 / 96 / 128 | 88–98 | 512 tokens 时差别不大；大 M 时 256 + 64 最好 |
 
-### 4. 最终结果（复测版，当前代码；`experiments/results/final_recheck.txt`、`final_recheck_smallm.txt`）
+### 4. 最终结果（复测版，当前代码；`experiments/fused_ar_final_recheck/results/final_recheck.txt`、`final_recheck_smallm.txt`）
 
 **测法：** 每个配置在同一进程里先后测 gemm2(m)、two-shot、「gemm2(m) 后接 two-shot」（依次执行，实测而非相加）和融合 kernel。GPU 先排一个 `torch.cuda._sleep` 再连发 100 次，取 3 次中最好的一次，再取 8 卡中最慢的 rank。两边都包含 `out.zero_()`。每次运行都做 10 次正确性检查（对比 fp32 `dist.all_reduce`），结果都是 bad=0。每组测试前先用 `wait_gpu_idle.sh` 确认 GPU 空闲。
 
@@ -268,7 +268,7 @@ c64 在大 M 时仍是最好的配置。
 - ≤256 tokens 应该回退到依次执行。
 - 4096 / 8192 tokens 剩下的空间主要在尾巴上（46–102 us），需要更快的通讯：更少的字节（例如 fp8 传输），或者每个 WG 更高的吞吐。
 
-### 5. 时间线揭示的剩余瓶颈（`experiments/scripts/fused_timeline.py`，`experiments/results/fused_timeline_v{2,3}.txt`）
+### 5. 时间线揭示的剩余瓶颈（`experiments/fused_ar_timeline/fused_timeline.py`，`experiments/fused_ar_timeline/results/fused_timeline_v{2,3}.txt`）
 
 1. **gemm2 自身被拖慢。** 512 tokens 时 tile 结束于约 73–75 us（单独跑约 67），2048 tokens 时 180 vs 166。原因有：
    - tile 顺序 `g` 加计数器，约 +2 至 +5；
@@ -297,7 +297,7 @@ c64 在大 M 时仍是最好的配置。
 3. **comm WG** 等自己负责的 unit 所在 chunk ready 后，先把该 chunk 剩下的 ticket 领完做掉，再做自己 unit 的规约和 all-gather。
 4. 正确性：所有配置 bad=0。当时用一个调试脚本（已随代码删除）验证过：每个 chunk 都正好计满 512 个 tile、32 个槽，并且被置 ready。
 
-**结果**（`experiments/results/gemm2_ar_help_sweep.txt`，64 个 comm WG，256 列 chunk；单位 us）：
+**结果**（`experiments/fused_ar_comm_help/results/gemm2_ar_help_sweep.txt`，64 个 comm WG，256 列 chunk；单位 us）：
 
 | tokens | 依次执行 | v1（`HELP=-1`） | ticket，`HELP=0` | `HELP=1` | `HELP=2` |
 |---|---|---|---|---|---|
@@ -306,7 +306,7 @@ c64 在大 M 时仍是最好的配置。
 | 1024 | 163–166 | 134.5 | 137.2 | 147.9 | 153.2 |
 | 2048 | 278–282 | 234.5 | 231.9 | 248.0 | 264.2 |
 
-时间线（`experiments/results/fused_timeline_help.txt`）解释了原因：
+时间线（`experiments/fused_ar_comm_help/results/fused_timeline_help.txt`）解释了原因：
 
 - **`HELP=0`**：gemm2 被拖慢得更少，2048 tokens 时 tile 结束于 161.5 us，v1 是 180。原因是单个 ready flag 取代了 32 个计数器的轮询。代价是瓶颈完全转到通讯：最后一个 chunk 在 161.5 完成，最后一个 unit 到 204.4 才结束，尾巴约 43 us。
 - **`HELP=1`**：gemm2 的 tile 结束时间从 161.5 推迟到 194.2 us（+33 us），512 tokens 时从 70.8 推迟到 76.4。
@@ -314,7 +314,7 @@ c64 在大 M 时仍是最好的配置。
   - 在这段时间里 WG 一直占着 CU 槽位，新的 gemm2 tile 发不进来。
   - 非常驻的 gemm2 里，每个 compute WG 只活约 10–20 us，多出几微秒就是 10–20% 的吞吐损失；省下的通讯时间远不够抵消。
   - mega_moe_tp 能这么做，是因为它的 CTA 常驻，comm wave 和 compute wave 在同一个 CTA 里交错执行，不存在释放槽位的问题。
-- **加更多 comm WG 也没用**（`experiments/results/gemm2_ar_ticket_cwg.txt`）：`HELP=0` 时 64、128、192 个 WG 的结果相同（2048 tokens 时 232–237 us）。`vpt=2` 更慢。瓶颈是每个 unit 的同步延迟，加上各 rank 进度不一致。
+- **加更多 comm WG 也没用**（`experiments/fused_ar_comm_help/results/gemm2_ar_ticket_cwg.txt`）：`HELP=0` 时 64、128、192 个 WG 的结果相同（2048 tokens 时 232–237 us）。`vpt=2` 更慢。瓶颈是每个 unit 的同步延迟，加上各 rank 进度不一致。
 
 **期间遇到的坑：**
 
@@ -333,7 +333,7 @@ c64 在大 M 时仍是最好的配置。
 - **reduce-scatter 时求 topk 和。** 对目标 shard 的每个 token，读出它的 8 行 route，用 fp32 求和后转成 bf16，再推送给 owner。
 - **精度：** 每个 rank 先在 fp32 下求和、只舍入一次 bf16，好过 atomic 方式的 8 次 bf16 累加。参考结果需要按同样的舍入点计算，之后 bad=0。
 
-**结果**（`experiments/results/gemm2_ar_route_sweep.txt`，64 个 comm WG，256 列 chunk；单位 us）：
+**结果**（`experiments/fused_ar_route/results/gemm2_ar_route_sweep.txt`，64 个 comm WG，256 列 chunk；单位 us）：
 
 | tokens | gemm2(m) + two-shot | gemm2 单独跑：atomic（skip） | gemm2 单独跑：route（skip） | 融合：atomic | 融合：route |
 |---|---|---|---|---|---|
@@ -342,18 +342,18 @@ c64 在大 M 时仍是最好的配置。
 | 1024 | 164.0 | 105.1 | **98.0** | **136.8** | 148.6 |
 | 2048 | 281.6 | 179.8 | **161.0** | **237.9** | 254.3 |
 
-时间线（`experiments/results/fused_timeline_route.txt`）：
+时间线（`experiments/fused_ar_route/results/fused_timeline_route.txt`）：
 
 - route 模式下 gemm2 的 tile 结束更早（2048 tokens 时 178 vs 187 us）。
 - 但每个 unit 从看到 chunk 完成到 RS 握手完成，由 6–10 us 涨到 13–25 us，原因是每个向量要额外读 8 行、全部 L2 未命中。最后一个 unit 在 2048 tokens 时到 235.6 us 才结束（atomic 为 210.8）。
-- 调参都没用（`experiments/results/gemm2_ar_route_{cwg,batch}.txt`）：comm WG 增加到 128/192/256，每批 2/4/8 个 peer 的 `ROUTE_BATCH`，512 列 chunk，结果都在 96–103 us（512 tokens）和 241–285 us（2048 tokens）之间。
+- 调参都没用（`experiments/fused_ar_route/results/gemm2_ar_route_{cwg,batch}.txt`）：comm WG 增加到 128/192/256，每批 2/4/8 个 peer 的 `ROUTE_BATCH`，512 列 chunk，结果都在 96–103 us（512 tokens）和 241–285 us（2048 tokens）之间。
 - 原因是：topk 求和本来由 8000 个 compute WG 并行做 atomic，现在挪到了几十个 comm WG 上，正好压在通讯这条关键路径上。mega_moe_tp 能这么做，是因为它的通讯由常驻 CTA 里大量空闲的 wave 动态认领，并行度远高于这里的 64 个 comm WG。
 
 ### 9. 并发上限：all-reduce 与 gemm2 完全无依赖（`nodep`）
 
 **问题：** 如果 all-reduce 根本不用等 gemm2 的结果，两者并发时最多能隐藏多少？这给出任何依赖调度方案（chunk 计数、ticket、LL 协议等）的天花板。
 
-**做法**（`experiments/scripts/concurrency_bound.py`；`ar_config(..., nodep=True)`）：
+**做法**（`experiments/fused_ar_concurrency_bound/concurrency_bound.py`；`ar_config(..., nodep=True)`）：
 
 - all-reduce 的输入是对称 buffer 里一块独立的 `src` 区（每个 rank 填自己的随机数据），与 gemm2 的 `moe_buf` 无关。comm WG 跳过 `_wait_chunk`，一启动就做 reduce-scatter → 规约 → all-gather；其余代码与 v1 完全相同（同样的 unit 划分、flag 协议、sc0\|sc1 读写）。gemm2 照常算，照常做 tile 计数器 atomic。
 - nodep 时不要求 tile 顺序 `g`，所以 `o=m`（gemm2 最快的顺序）也能测。
@@ -365,7 +365,7 @@ c64 在大 M 时仍是最好的配置。
   - **commWG alone**：comm kernel 单独跑，测 c 个 comm WG 本身的通讯速度。
 - 正确性：所有配置的结果都等于 fp32 all_reduce(src)，bad=0。
 
-**结果**（`experiments/results/gemm2_ar_concurrency_bound{,_run2}.txt`，两次运行的范围；256 列 chunk；单位 us；AR 被隐藏的比例 = (gemm2 + AR − 实测) / AR）：
+**结果**（`experiments/fused_ar_concurrency_bound/results/gemm2_ar_concurrency_bound{,_run2}.txt`，两次运行的范围；256 列 chunk；单位 us；AR 被隐藏的比例 = (gemm2 + AR − 实测) / AR）：
 
 | tokens | gemm2(m) | two-shot AR | 依次执行 | side stream（较好的入队顺序） | sep nodep（最佳 c） | **fused nodep（最佳）** | 被隐藏的比例上限 | v1 有依赖（第 4 节） |
 |---|---|---|---|---|---|---|---|---|
@@ -403,7 +403,7 @@ c64 在大 M 时仍是最好的配置。
 
 **数据来源：**
 
-- trace：`ck_test/ui_output_agent_52389_dispatch_3909`，分析脚本 `experiments/scripts/att_analyze.py`，输出存为 `experiments/results/att_fused_tp4_512.txt`。
+- trace：`ck_test/ui_output_agent_52389_dispatch_3909`，分析脚本 `experiments/fused_ar_att/att_analyze.py`，输出存为 `experiments/fused_ar_att/results/att_fused_tp4_512.txt`。
 - 每个 SE 只采了 CU0，共 4 个 CU、632 个 wave，其中 comm wave 只采到 8 个（2 个 WG）。时钟按 `realtime.json` 换算为 1703 cycle/us。
 - ATT 本身会拖慢执行，所以下面的绝对时间只作参考，看比例。
 - 注意：`make_case` 里写死了 I=256，所以 TP4 跑出来的仍是 TP8 的 per-rank shape（kernel 名里是 `i256`）。
@@ -478,10 +478,10 @@ c64 在大 M 时仍是最好的配置。
 **WPERM 的正确性：** 用标准 preshuffle 权重，去掉交织后依然正确。
 
 - pytest 16/16 通过，误差与原来相同（1−cos 约 9.4e-6）。
-- 单点探针 `experiments/scripts/wperm_probe.py`：A 只在第 k 列为 1，W 只在第 k' 列为 2。两种解码得到的都是严格的对角，即 A[k] 只与 W[k] 配对。
+- 单点探针 `experiments/fused_ar_opt_ab/wperm_probe.py`：A 只在第 k 列为 1，W 只在第 k' 列为 2。两种解码得到的都是严格的对角，即 A[k] 只与 W[k] 配对。
 - 原因还没想清楚：从源码推导，交织应该决定 B 的字节顺序。由于没有速度收益，没有继续深究，默认关闭。
 
-**结果**（`experiments/results/opt_ab_sweep.txt`，8 卡，c64 ch256，单位 us。标了 INVALID 的那组是在别人占满 GPU 时跑的，作废）：
+**结果**（`experiments/fused_ar_opt_ab/results/opt_ab_sweep.txt`，8 卡，c64 ch256，单位 us。标了 INVALID 的那组是在别人占满 GPU 时跑的，作废）：
 
 | tokens | gemm2(m) 单独跑：A / D | 融合，A：原样（3 次中位数） | 融合，D：DRAIN+TBL=s+wave（5 次中位数） | 融合，E/F/G：D 加 BF16_FAST / WPERM / 两者 |
 |---|---|---|---|---|
@@ -493,14 +493,14 @@ c64 在大 M 时仍是最好的配置。
 **注意事项：**
 
 - 这台机器的 GPU 和别人共用。有一组测试遇到 8 个外部进程、100% 占用，时间被放大了 3–8 倍。
-- 现在用 `experiments/scripts/wait_gpu_idle.sh` 先确认 GPU 空闲（`rocm-smi --showuse/--showpids`）再跑。
+- 现在用 `experiments/tools/wait_gpu_idle.sh` 先确认 GPU 空闲（`rocm-smi --showuse/--showpids`）再跑。
 - 多组 torchrun 循环运行期间不要修改 kernel 源码，后面的组会导入改了一半的代码。
 
 ### 12. 评估：改成常驻 CTA（仿 mega_moe_tp）有没有进一步收益
 
 **问题：** 从 ATT 里看到，同一个 wave 槽位上相邻两次 gemm2 CTA 启动之间有空隙。改成 persistent CTA 能否消除这部分开销？进一步，仿照 mega_moe_tp 的整套方案能否继续提升？
 
-**1. 槽位空隙有多大**（`experiments/scripts/att_slot_gaps.py`，trace 56655，TP4，512 tokens，每个 SE 采 CU0）：
+**1. 槽位空隙有多大**（`experiments/fused_ar_persistent/att_slot_gaps.py`，trace 56655，TP4，512 tokens，每个 SE 采 CU0）：
 
 - gemm2 阶段内，槽位空闲时间只占 **4.1%**。
 - 相邻两个 gemm wave 之间的间隔：中位数 0.20 us，p75 0.47，p90 0.84，最大 1.64 us。
@@ -539,7 +539,7 @@ c64 在大 M 时仍是最好的配置。
 - 在 `test_a8w4_gemm2.py` 里加了开关：只启动 k × CU 数个 compute CTA，每个 CTA 按 grid stride 循环处理 tile（`for t in range(bx, bound, grid_dim.x − cwg)`），每个 tile 之后 `gpu.barrier()`。tile 本身的代码和 comm role 都不变；CTA 数是 8 的倍数，tile 仍落在原来的 XCD 上。
 - 默认 `PERSIST=0`，行为与原来一致。不过 `_entry` 为此改成了「嵌套函数 `_tile_work` 加调用」的结构。
 - 正确性：pytest 在 `PERSIST=0` / `4` / `6` 下都是 16/16 通过。`PERSIST=4` 最初那次失败是 `gpu.grid_dim` 的用法错误，修正为 `gpu.grid_dim.x` 后重跑通过。
-- 结果（`experiments/results/persist_lite_sweep.txt`，8 卡，c64 ch256，单位 us；k=4 那一轮正好碰上上面的错误，所以没有数据）：
+- 结果（`experiments/fused_ar_persistent/results/persist_lite_sweep.txt`，8 卡，c64 ch256，单位 us；k=4 那一轮正好碰上上面的错误，所以没有数据）：
 
 | tokens | gemm2(m)：k=0 / 5 / 6 / 8 | 融合：k=0 / 5 / 6 / 8 |
 |---|---|---|
@@ -558,33 +558,32 @@ c64 在大 M 时仍是最好的配置。
 
 ```bash
 # tile 顺序探针（单卡）
-ORDERS=m,n,nx,g python doc-mimo/experiments/scripts/g2_order_probe.py
+ORDERS=m,n,nx,g python doc-mimo/experiments/gemm2_tile_order/g2_order_probe.py
 # 融合 vs 依次执行（8 卡）；CWG / VPT / SPLIT / SEP / CHUNK / MODES=skip,run / WPE / A_GROUP / ROUTE（0 = atomic，8 = topk 求和放到通讯阶段）/ ROUTE_BATCH
 CHUNK=256 CWG=64 torchrun --nproc_per_node=8 doc-mimo/kernels/gemm2_ar_fused.py 128 512 2048
 # 时间线（AR_PROBE=1 自动打开；ROUTE=8 可选）
-CHUNK=256 CWG=64 torchrun --nproc_per_node=8 doc-mimo/experiments/scripts/fused_timeline.py 512 2048
+CHUNK=256 CWG=64 torchrun --nproc_per_node=8 doc-mimo/experiments/fused_ar_timeline/fused_timeline.py 512 2048
 # 并发上限（第 9 节）：side stream / fused nodep / sep nodep / idle / comm 单独跑
-CWG=32,64,128 CHUNK=256 torchrun --nproc_per_node=8 doc-mimo/experiments/scripts/concurrency_bound.py 128 512 1024 2048
+CWG=32,64,128 CHUNK=256 torchrun --nproc_per_node=8 doc-mimo/experiments/fused_ar_concurrency_bound/concurrency_bound.py 128 512 1024 2048
 ```
 
-### 本轮新增的实验脚本与结果（`experiments/`）
+### 实验目录
 
-| 文件 | 内容 |
+各节对应的实验目录（`experiments/<实验名>/`，每个目录含 README、脚本和 `results/`；总索引见 [experiments/README.md](experiments/README.md)）：
+
+| 本文章节 | 实验目录 |
 |---|---|
-| `scripts/g2_order_probe.py` | gemm2 tile 顺序的耗时，以及各 chunk 的完成时刻 |
-| `scripts/fused_timeline.py` | 融合 kernel 的 chunk 完成时刻与 comm unit 各阶段的时间线 |
-| `results/gemm2_ar_help_sweep.txt`、`gemm2_ar_ticket_cwg.txt`、`fused_timeline_help.txt` | 第 7 节（compute WG 帮忙，代码已撤销） |
-| `results/gemm2_ar_route_{sweep,cwg,batch}.txt`、`fused_timeline_route.txt` | 第 8 节（topk 求和放到通讯阶段） |
-| `scripts/concurrency_bound.py`、`results/gemm2_ar_concurrency_bound{,_run2}.txt` | 第 9 节（gemm2 与 all-reduce 无依赖并发的上限） |
-| `scripts/att_analyze.py`、`results/att_fused_tp4_512.txt` | 第 10 节（thread trace 分析） |
-| `results/opt_ab_sweep.txt`、`scripts/wperm_probe.py`、`scripts/wait_gpu_idle.sh` | 第 11 节（优化尝试 A/B、WPERM 配对探针、等待 GPU 空闲） |
-| `comm-wg-behavior.md`、`scripts/att_comm_timeline.py`、`results/att_comm_timeline_tp4_512.txt` | comm WG 的整体行为：如何与 gemm2 同步、如何与其他 rank 同步（结合反汇编和 ATT 时间线） |
-| `scripts/att_slot_gaps.py`、`results/att_slot_gaps.txt`、`results/persist_lite_sweep.txt` | 第 12 节（wave 槽位空隙，以及常驻 CTA 的评估） |
-| `results/final_recheck.txt`、`results/final_recheck_smallm.txt` | 第 4 节复测：128–8192 tokens 两次运行、cwg 对比、nodep 上限、时间线、小 M 配置扫描 |
-| `scripts/g2_epilog_ablation.py` | 当时 gemm2 的快照：epilogue 分别用 atomic、store、不写回（`EPI=` 环境变量） |
-| `scripts/ag_segment_sweep.py` | one-shot all-gather 的连续写段长扫描 |
-| `scripts/prof_gemm1_push.py` | gemm1 融合推送的 profiler 拆分 |
-| `scripts/e2e_fused_quant_breakdown.py` | 融合量化 e2e 各 kernel 的耗时 |
-| `scripts/g2_agroup_wpe.py` | gemm2 分组 A scale 与 `waves_per_eu` 的对比 |
-| `scripts/pyhip_shim/sitecustomize.py` | `pyhip.contrib` 缺失时的导入桩 |
-| `results/gemm2_ar_fused_final.txt`、`results/fused_timeline_v{2,3}.txt`、`results/g2_order_probe.txt`、`results/raw_*.txt` | 本轮各实验的原始输出 |
+| 前半部分（N 维切分 TP）第 1 节 | `gemm2_epilog_ablation` |
+| 前半部分第 2–4 节 | `nsplit_tp_allgather` |
+| 前半部分第 5 节 | `fused_quant` |
+| 后半部分第 2 节（tile 顺序） | `gemm2_tile_order` |
+| 第 3 节（优化过程）、第一版最终结果 | `fused_ar_dev` |
+| 第 4 节（复测） | `fused_ar_final_recheck` |
+| 第 5 节（时间线） | `fused_ar_timeline` |
+| 第 7 节（compute WG 帮忙） | `fused_ar_comm_help` |
+| 第 8 节（route 模式） | `fused_ar_route` |
+| 第 9 节（并发上限） | `fused_ar_concurrency_bound` |
+| 第 10 节（ATT） | `fused_ar_att` |
+| 第 11 节（优化 A/B、WPERM） | `fused_ar_opt_ab` |
+| `comm-wg-behavior.md` | `fused_ar_comm_wg` |
+| 第 12 节（常驻 CTA） | `fused_ar_persistent` |

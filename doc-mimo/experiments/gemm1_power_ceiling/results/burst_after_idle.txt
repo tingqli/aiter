@@ -1,0 +1,3 @@
+standalone  burst after idle, launch 1..5 median us:  192.9  192.7  191.6  192.1  192.1  -> 3.15 TB/s (576MB)
+port        burst after idle, launch 1..5 median us:  199.1  199.2  199.5  199.0  197.9  -> 3.05 TB/s (576MB)
+torch.sum   burst after idle, launch 1..5 median us:  191.1  186.3  187.4  187.5  186.2  -> 3.24 TB/s (576MB)

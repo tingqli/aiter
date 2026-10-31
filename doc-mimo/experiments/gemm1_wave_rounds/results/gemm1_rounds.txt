@@ -1,0 +1,19 @@
+E=  76 tokens=  152 m-blocks=  76 WGs=  304 rounds(608 slots)=0.50 max tok/exp= 24 | std    54.6 us 3.13 TB/s | port    66.3 us 2.58 TB/s
+E= 152 tokens=  304 m-blocks= 152 WGs=  608 rounds(608 slots)=1.00 max tok/exp= 27 | std   106.1 us 3.23 TB/s | port   116.6 us 2.94 TB/s
+E= 228 tokens=  456 m-blocks= 228 WGs=  912 rounds(608 slots)=1.50 max tok/exp= 31 | std   165.2 us 3.11 TB/s | port   174.2 us 2.95 TB/s
+E= 256 tokens=  512 m-blocks= 256 WGs= 1024 rounds(608 slots)=1.68 max tok/exp= 31 | std   194.3 us 2.97 TB/s | port   212.9 us 2.71 TB/s
+E= 304 tokens=  608 m-blocks= 304 WGs= 1216 rounds(608 slots)=2.00 max tok/exp= 27 | std   226.0 us 3.03 TB/s | port   226.1 us 3.03 TB/s
+E= 380 tokens=  760 m-blocks= 380 WGs= 1520 rounds(608 slots)=2.50 max tok/exp= 29 | std   272.2 us 3.15 TB/s | port   280.7 us 3.05 TB/s
+E= 456 tokens=  912 m-blocks= 456 WGs= 1824 rounds(608 slots)=3.00 max tok/exp= 28 | std   327.5 us 3.14 TB/s | port   328.7 us 3.13 TB/s
+E= 532 tokens= 1064 m-blocks= 532 WGs= 2128 rounds(608 slots)=3.50 max tok/exp= 30 | std   382.5 us 3.13 TB/s | port   381.2 us 3.14 TB/s
+E= 608 tokens= 1216 m-blocks= 608 WGs= 2432 rounds(608 slots)=4.00 max tok/exp= 27 | std   440.2 us 3.11 TB/s | port   434.1 us 3.16 TB/s
+E= 228 rep0 WGs=  912 rounds=1.50 | std   177.1 us 2.90 TB/s | port 2.75
+E= 256 rep0 WGs= 1024 rounds=1.68 | std   194.2 us 2.97 TB/s | port 2.72
+E= 304 rep0 WGs= 1216 rounds=2.00 | std   220.2 us 3.11 TB/s | port 2.87
+E= 380 rep0 WGs= 1520 rounds=2.50 | std   276.2 us 3.10 TB/s | port 2.73
+E= 608 rep0 WGs= 2432 rounds=4.00 | std   426.4 us 3.21 TB/s | port 3.16
+E= 228 rep1 WGs=  912 rounds=1.50 | std   166.3 us 3.09 TB/s | port 2.75
+E= 256 rep1 WGs= 1024 rounds=1.68 | std   194.9 us 2.96 TB/s | port 2.71
+E= 304 rep1 WGs= 1216 rounds=2.00 | std   212.1 us 3.23 TB/s | port 2.94
+E= 380 rep1 WGs= 1520 rounds=2.50 | std   266.1 us 3.22 TB/s | port 2.79
+E= 608 rep1 WGs= 2432 rounds=4.00 | std   434.1 us 3.16 TB/s | port 2.99

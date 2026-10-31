@@ -1,0 +1,5 @@
+a8w4_gemm1_h4096_i512_ne256_bm32_tn128_tk256_bcm2_xcd1_ftz_p n=105 median 188.8 us min 171.2 | {'VGPR_Count': '104', 'Accum_VGPR_Count': '128', 'SGPR_Count': '112', 'LDS_Block_Size': '16384', 'Grid_Size_X': '393216'}
+gemm1_a16w4_port_a8w4_h4096_i512_ne256_bm32_tn128_xcd1_asw_ftz_krt n=105 median 205.2 us min 193.9 | {'VGPR_Count': '120', 'Accum_VGPR_Count': '0', 'SGPR_Count': '48', 'LDS_Block_Size': '8192', 'Grid_Size_X': '393216'}
+a8w4_gemm1_h4096_i512_ne256_bm32_tn128_tk256_bcm2_xcd1_ftz_p_wt n=105 median 192.4 us min 184.9 | {'VGPR_Count': '104', 'Accum_VGPR_Count': '128', 'SGPR_Count': '112', 'LDS_Block_Size': '16384', 'Grid_Size_X': '393216'}
+a8w4_gemm1_h4096_i512_ne256_bm32_tn128_tk256_bcm2_xcd1_ftz_p_fd1 n=105 median 180.8 us min 163.6 | {'VGPR_Count': '100', 'Accum_VGPR_Count': '132', 'SGPR_Count': '112', 'LDS_Block_Size': '16384', 'Grid_Size_X': '393216'}
+a8w4_gemm1_h4096_i512_ne256_bm32_tn128_tk256_bcm2_xcd1_ftz_p_fd2 n=105 median 175.9 us min 159.5 | {'VGPR_Count': '120', 'Accum_VGPR_Count': '128', 'SGPR_Count': '112', 'LDS_Block_Size': '16384', 'Grid_Size_X': '393216'}

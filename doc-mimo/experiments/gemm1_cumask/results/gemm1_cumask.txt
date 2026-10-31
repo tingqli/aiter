@@ -1,0 +1,20 @@
+placement check (HW_ID probe, 1 WG per CU):
+  mask 38 CU/XCD: 304 WGs ran on 304 distinct CUs, per XCD 38-38, per SE 9-10
+  mask 36 CU/XCD: 304 WGs ran on 288 distinct CUs, per XCD 36-36, per SE 9-9
+  mask 32 CU/XCD: 304 WGs ran on 256 distinct CUs, per XCD 32-32, per SE 8-8
+  mask 28 CU/XCD: 304 WGs ran on 224 distinct CUs, per XCD 28-28, per SE 7-7
+  mask 24 CU/XCD: 304 WGs ran on 192 distinct CUs, per XCD 24-24, per SE 6-6
+  mask 19 CU/XCD: 304 WGs ran on 152 distinct CUs, per XCD 19-19, per SE 4-5
+  mask 16 CU/XCD: 304 WGs ran on 128 distinct CUs, per XCD 16-16, per SE 4-4
+tile_n=128 (grid 1024 WGs), b_cache_mod=2, us (TB/s):
+  CU/XCD    default stream               38               36               32               28               24               19               16
+  a8w4_gemm1     191.5 (3.01)    192.3 (3.00)    191.5 (3.01)    209.1 (2.76)    214.4 (2.69)    227.9 (2.53)    252.0 (2.29)    265.7 (2.17)
+  a8w4_gemm1     195.2 (2.95)    192.0 (3.00)    193.0 (2.99)    210.8 (2.74)    209.6 (2.75)    231.2 (2.49)    253.9 (2.27)    264.9 (2.18)
+  port           201.4 (2.86)    199.1 (2.90)    199.9 (2.89)    219.1 (2.63)    218.7 (2.64)    236.2 (2.44)    262.6 (2.20)    273.5 (2.11)
+  port           198.3 (2.91)    199.7 (2.89)    203.5 (2.83)    224.0 (2.58)    219.1 (2.63)    242.6 (2.38)    260.7 (2.21)    275.9 (2.09)
+tile_n=64 (grid 2048 WGs), b_cache_mod=2, us (TB/s):
+  CU/XCD    default stream               38               36               32               28               24               19               16
+  a8w4_gemm1     188.8 (3.05)    189.6 (3.04)    200.2 (2.88)    202.6 (2.85)    209.8 (2.75)    226.2 (2.55)    254.8 (2.26)    264.1 (2.18)
+  a8w4_gemm1     187.7 (3.07)    194.7 (2.96)    194.7 (2.96)    202.5 (2.85)    204.9 (2.81)    223.5 (2.58)    256.6 (2.25)    265.8 (2.17)
+  port           204.6 (2.82)    200.4 (2.88)    201.4 (2.86)    205.3 (2.81)    211.8 (2.72)    246.4 (2.34)    266.2 (2.17)    275.3 (2.09)
+  port           200.5 (2.88)    199.2 (2.89)    201.4 (2.86)    203.0 (2.84)    214.9 (2.68)    243.9 (2.36)    269.8 (2.14)    275.9 (2.09)

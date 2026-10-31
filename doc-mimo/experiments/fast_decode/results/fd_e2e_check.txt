@@ -1,0 +1,4 @@
+cmp fd0 run-to-run cos 4.35e-06 maxabs 6.400e+02 equal False
+cmp fd0 vs fd1 cos 3.67e-06 maxabs 5.120e+02
+cmp fd0 vs fd2 cos 3.73e-06 maxabs 5.120e+02
+cmp gemm1 inter fd0==fd1 True fd0==fd2 True

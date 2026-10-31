@@ -1,0 +1,8 @@
+cfg I512 E256 tok512 bm32: std 103.2 | fd1 97.1 | fd2 95.6 us | err 2.4318695068359375e-05,2.4318695068359375e-05 cos 9.4e-06 vs std cos 9.4e-06 | port 117.1
+cfg I512 E256 tok512 bm64: std 111.5 | fd1 101.6 | fd2 98.6 us | err 2.2411346435546875e-05,2.3365020751953125e-05 cos 9.3e-06 vs std cos 9.3e-06 | port 169.0
+cfg I512 E304 tok512 bm32: std 116.9 | fd1 111.6 | fd2 110.0 us | err 2.2411346435546875e-05,2.384185791015625e-05 cos 9.4e-06 vs std cos 9.4e-06 | port 131.5
+cfg I512 E304 tok512 bm64: std 126.5 | fd1 112.4 | fd2 108.3 us | err 3.0517578125e-05,2.9087066650390625e-05 cos 9.4e-06 vs std cos 9.4e-06 | port 195.8
+cfg I256 E256 tok512 bm32: std 59.5 | fd1 56.6 | fd2 52.9 us | err 0,4.76837158203125e-07 cos 9.3e-06 vs std cos 9.3e-06 | port 67.5
+cfg I256 E256 tok512 bm64: std 61.7 | fd1 59.2 | fd2 58.6 us | err 1.430511474609375e-06,1.9073486328125e-06 cos 9.4e-06 vs std cos 9.4e-06 | port 98.6
+cfg I512 E256 tok2048 bm32: std 237.3 | fd1 223.8 | fd2 216.2 us | err 2.1576881408691406e-05,2.193450927734375e-05 cos 9.4e-06 vs std cos 9.4e-06 | port 267.1
+cfg I512 E256 tok2048 bm64: std 219.5 | fd1 216.9 | fd2 195.2 us | err 2.3126602172851562e-05,2.300739288330078e-05 cos 9.4e-06 vs std cos 9.4e-06 | port 280.9

@@ -1,0 +1,14 @@
+nw=4  RL=1  2 KB runs (gemm1 now)      163.7 us   3.28 TB/s
+nw=4  RL=1  + rot                      153.6 us   3.50 TB/s
+nw=4  RL=2  4 KB runs                  137.7 us   3.90 TB/s
+nw=4  RL=4  8 KB runs                  138.7 us   3.87 TB/s
+nw=4  RL=8  16 KB runs (gate | up)     140.8 us   3.81 TB/s
+nw=4  contig 32 KB / K-tile            136.6 us   3.93 TB/s
+nw=4  contig + rot                     139.1 us   3.86 TB/s
+nw=8  RL=1  2 KB runs (gemm1 now)      154.6 us   3.47 TB/s
+nw=8  RL=1  + rot                      152.1 us   3.53 TB/s
+nw=8  RL=2  4 KB runs                  144.2 us   3.72 TB/s
+nw=8  RL=4  8 KB runs                  136.0 us   3.95 TB/s
+nw=8  RL=8  16 KB runs (gate | up)     137.3 us   3.91 TB/s
+nw=8  contig 32 KB / K-tile            132.8 us   4.04 TB/s
+nw=8  contig + rot                     135.0 us   3.98 TB/s

@@ -1,0 +1,56 @@
+# ATT analysis output, run 42008 (512 tokens, E=256, inter 512, bm32 tn128, b_cache_mod=1)
+# dispatch 6033/6034 = standalone a8w4_gemm1 (..._bcm1_xcd1_ftz_p), 6172/6173 = port
+# (gemm1_a16w4_port_a8w4_...). The raw traces (ck_test/ui_output_agent_42008_*) were not
+# kept; this is the output of att_gemm1.py / att_gemm1_iters.py / att_simd_issue.py-style
+# analysis at the time. "us" values use realtime.json, which is NOT reliable per dispatch:
+# compare cycles (6033 spans 438552 cycles, 6034 224440, 6172 219716, 6173 227928 while the
+# untraced kernels all take ~206-228 us -> 6033 ran at ~2 GHz, the others at ~1 GHz).
+
+== 6173 (port)  att_gemm1.py
+waves traced: 76  (with >500 instructions: 56)
+SE0 CU0: span 122.2 us, real waves 12 (WG ~3.0) | ends 72.6 x4, 94.8 x4, 122.1 x4
+SE2 CU0: span 155.1 us, real waves 16 (WG ~4.0) | ends 78.0 x4, 100.6 x4, 129.1-129.4 x4, 155.0 x4
+real waves alive on CU at 5%..95% of span (SE2): [16, 16, 16, 16, 16, 12, 8, 8, 4, 4]
+wall time per real wave by class (56 waves):
+  valu            57.67 us   54.3%   instr/wave 10194
+  waitcnt vmcnt   20.60 us   19.4%   instr/wave   162
+  s_barrier       10.10 us    9.5%   instr/wave    32
+  mfma             6.86 us    6.5%   instr/wave  1024
+  vmem load        5.06 us    4.8%   instr/wave   246
+most-executed branch: 16.0/wave, iteration median 4.13 us (p10 3.35, p90 10.02)
+
+== 6033 (standalone, ~2 GHz)  att_gemm1.py
+SE1 CU0: span 215.2 us, real waves 16, waves alive always 8 (= 2 WGs/CU: 104 VGPR + 128 AGPR)
+  ends 122.8 x4, 134.3 x4, 205.0 x4, 215.1 x4
+wall time per real wave by class (52 waves):
+  waitcnt vmcnt   45.23 us   41.4%   instr/wave    97
+  vmem load       31.08 us   28.4%   instr/wave   214
+  valu            23.24 us   21.2%   instr/wave  8868
+  s_barrier        3.52 us    3.2%
+  mfma             2.52 us    2.3%   instr/wave  1024
+iteration median 6.47 us (p10 3.43, p90 9.15)
+
+== 6034 (standalone, ~1 GHz)  att_gemm1.py
+SE0 CU0: ends 60.9 x4, 87.1 x4, 115.4 x4 | SE2 CU0 (4 WGs): 61.7, 87.3, 120.5, 146.1
+wall time per real wave by class (52 waves):
+  valu            35.68 us   53.0%   instr/wave  8868
+  vmem load       13.53 us   20.1%
+  waitcnt vmcnt    6.79 us   10.1%
+  mfma             3.53 us    5.2%
+iteration median 2.41 us (p10 2.22, p90 5.75)
+
+== 6172 (port)  att_gemm1.py
+wall time per real wave: valu 47.2%, waitcnt vmcnt 25.2%, s_barrier 11.6%, mfma 6.1%
+
+== K-iteration cycles by waves alive on the CU (att_gemm1_iters.py)
+6033: 4 waves 8632 | 8 waves 14644
+6034: 4 waves 3408 | 8 waves 4106
+6172: 4 waves 5868 | 8 waves 6482 | 12 waves 8168 | 16 waves 8156
+6173: 4 waves 5624 | 8 waves 5804 | 12 waves 5972 | 16 waves 7164
+
+== per K-iteration per wave instruction mix, SIMD VALU-issue busy by waves alive on the SIMD
+6033: lds 10, mfma 64, salu/other 30, valu 529, vmem 12 -> VALU issue 2116 cyc/wave/iter
+      busy: 1 wave 24%, 2 waves 29%
+6034: same mix                                      busy: 1 wave 60%, 2 waves 73%
+6173: lds 10, mfma 64, salu/other 37, valu 607, vmem 14 -> 2428 cyc/wave/iter
+      busy: 1 wave 43%, 2 waves 75%, 3 waves 87%, 4 waves 92%

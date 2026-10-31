@@ -16,8 +16,8 @@
 
 **脚本与原始输出：**
 
-- 时间线：`experiments/scripts/att_comm_timeline.py`，输出 `experiments/results/att_comm_timeline_tp4_512.txt`。
-- 整体统计：`experiments/scripts/att_analyze.py`。
+- 时间线：`experiments/fused_ar_comm_wg/att_comm_timeline.py`，输出 `experiments/fused_ar_comm_wg/results/att_comm_timeline_tp4_512.txt`。
+- 整体统计：`experiments/fused_ar_att/att_analyze.py`。
 - 文中的 `#1461` 指 `code.json` 的指令序号（`stats_*.csv` 中的行号）。
 
 ---
@@ -273,7 +273,7 @@ SE0 上的另一个 comm WG：chunk 完成时刻为 17.0、25.2、33.9、44.3；
 
 ## 9. 按第 8 节做的改进尝试（结果：都没有收益）
 
-结果见 `experiments/results/opt_wait_ag.txt` 和 `opt_rs_ll.txt`。条件：8 卡 TP8，c64 ch256，单位 us，每个配置都在 GPU 空闲时运行（`experiments/scripts/wait_gpu_idle.sh`）。
+结果见 `experiments/fused_ar_comm_wg/results/opt_wait_ag.txt` 和 `opt_rs_ll.txt`。条件：8 卡 TP8，c64 ch256，单位 us，每个配置都在 GPU 空闲时运行（`experiments/tools/wait_gpu_idle.sh`）。
 
 ### 9.1 退出前并行等待 ag flag（`WAIT_AG=par`，已保留为默认）
 

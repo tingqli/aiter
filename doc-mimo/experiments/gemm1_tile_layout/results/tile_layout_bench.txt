@@ -1,0 +1,11 @@
+-- tile_n x b_cache_mod
+cfg tn128 bcm2: std 195.9 us | tile 196.0 us 2.94 TB/s err 0 bitexact True | port 210.1
+cfg tn128 bcm1: std 211.7 us | tile 214.0 us 2.70 TB/s err 0 bitexact True | port 232.8
+cfg tn64 bcm2: std 190.0 us | tile 195.8 us 2.95 TB/s err 0 bitexact True | port 214.7
+-- repeats (b_cache_mod=2)
+cfg rep0 bm32 tn128 dyn0: std 193.2 | tile 206.2 us (2.80 TB/s) bitexact True
+cfg rep0 bm32 tn64 dyn0: std 187.5 | tile 202.0 us (2.86 TB/s) bitexact True
+cfg rep0 bm64 tn128 dyn1: std 198.8 | tile 197.4 us (2.92 TB/s) bitexact True
+cfg rep1 bm32 tn128 dyn0: std 192.1 | tile 204.8 us (2.82 TB/s) bitexact True
+cfg rep1 bm32 tn64 dyn0: std 186.8 | tile 197.6 us (2.92 TB/s) bitexact True
+cfg rep1 bm64 tn128 dyn1: std 191.0 | tile 204.1 us (2.83 TB/s) bitexact True
