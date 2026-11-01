@@ -2,6 +2,8 @@
 
 ## 结论
 
+> **更正（见 [moe_token_scaling](../moe_token_scaling/)）**：下面的结论不成立。复测发现，FlyDSL 磁盘缓存会让 `EPI` 的各个变体复用同一份旧二进制：store 版误差也只有约 1e-6，说明实际跑的还是 atomic。每个变体用独立的 `FLYDSL_RUNTIME_CACHE_DIR` 重新测（bm64，dyn_rows）后：store 与 atomic 耗时相同；不写回时，512 / 2048 / 8192 / 16384 tokens 分别快 20% / 24% / 30% / 35%。gemm2 的瓶颈在 epilogue 整体，而不在 atomic 指令本身。
+
 - 把 gemm2 epilogue 的 atomic 换成普通 store、或者完全不写回，在 128 / 512 / 2048 tokens 时**耗时都不变**。
 - 所以 gemm2（TP8 shape：N=4096，K=256）不受 atomic 或输出写回限制，而是受读权重和主循环限制（128 tokens 时约 3.1 TB/s）。
 - 推论：N 维切分 TP 方案里「atomic 少 8 倍」的设想不会带来收益（见 `../nsplit_tp_allgather`、`moe-new-tp.md` 第 1 节）。

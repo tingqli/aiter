@@ -1,0 +1,44 @@
+64 waves; first ds_bpermute at code index 3175
+
+gemm1: per wave median 211584 cycles (p10 172988, p90 287024)
+  valu        39.7%      85602 cyc/wave  n/wave  12111.2
+  mfma        25.4%      54897 cyc/wave  n/wave   3840.0
+  vmem ld     11.4%      24492 cyc/wave  n/wave    474.2
+  wait lgkm    7.7%      16635 cyc/wave  n/wave    460.1
+  wait vm      4.6%       9969 cyc/wave  n/wave    208.2
+  barrier      4.4%       9391 cyc/wave  n/wave     68.0
+  ds wr        2.8%       6018 cyc/wave  n/wave    187.5
+  ds rd        1.4%       3120 cyc/wave  n/wave    520.9
+  s_nop        1.2%       2534 cyc/wave  n/wave    359.4
+  salu         1.0%       2238 cyc/wave  n/wave    321.8
+  scratch      0.4%        798 cyc/wave  n/wave     26.2
+  other        0.0%         49 cyc/wave  n/wave     11.2
+
+gemm2: per wave median 109280 cycles (p10 100176, p90 126824)
+  valu        61.0%      66543 cyc/wave  n/wave  10742.0
+  mfma        15.3%      16692 cyc/wave  n/wave   1920.0
+  salu        10.8%      11802 cyc/wave  n/wave   1793.6
+  atomic       5.4%       5852 cyc/wave  n/wave    480.0
+  wait vm      3.0%       3275 cyc/wave  n/wave     97.5
+  vmem ld      1.8%       1970 cyc/wave  n/wave    223.1
+  s_nop        1.7%       1876 cyc/wave  n/wave    305.4
+  ds bperm     0.6%        661 cyc/wave  n/wave     45.0
+  wait lgkm    0.3%        382 cyc/wave  n/wave     15.0
+  ds rd        0.0%         42 cyc/wave  n/wave      7.0
+  scratch      0.0%         29 cyc/wave  n/wave      3.5
+
+kernel: ; a8w4_fmoe_bm64_h4096_i256_ne256_k8_bcm2_w2_dyn
+clock: 1015 cycles/us (from realtime.json SE0)
+waves traced: 64  (with >500 instructions: 64)
+SE0 CU0: span  707.3 us, real waves 16 (WG ~4.0), empty 0
+   real waves alive on CU at 5%,15%..95% of span: [8, 8, 8, 8, 8, 8, 8, 4, 4, 4]
+SE1 CU0: span  744.6 us, real waves 16 (WG ~4.0), empty 0
+   real waves alive on CU at 5%,15%..95% of span: [8, 8, 8, 8, 8, 4, 8, 8, 4, 4]
+SE2 CU0: span  754.0 us, real waves 16 (WG ~4.0), empty 0
+   real waves alive on CU at 5%,15%..95% of span: [8, 8, 8, 8, 8, 8, 8, 8, 4, 4]
+SE3 CU0: span  717.1 us, real waves 16 (WG ~4.0), empty 0
+   real waves alive on CU at 5%,15%..95% of span: [8, 8, 8, 8, 4, 4, 8, 8, 4, 4]
+
+waves alive on SIMD=1: windows 1447  VALU issue busy median  40.8%  p90  50.2%  mfma/2000cyc 44
+waves alive on SIMD=2: windows 4471  VALU issue busy median  55.0%  p90  69.2%  mfma/2000cyc 72
+gap between consecutive VALU issues on a SIMD (cycles): 0:4.8%, 4:70.9%, 8:14.8%, 12:2.6%, 16:1.9%, 20:1.0%, 24:0.6%, 28:0.3%, 32:0.7%, 36:0.3%, 40:2.1%

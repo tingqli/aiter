@@ -17,13 +17,14 @@
 | [gemm1_config_sweep](gemm1_config_sweep/) | 只抽出 A8W4 用到的路径，加流水、sign-mask LUT、`dyn_m`：512 tokens 约 83–87 us（port 约 113），与 port 逐位一致 |
 | [gemm1_att_stats](gemm1_att_stats/) | 早期 gemm1 的 ATT：访存等待和访存发射约占一半，VALU 约 34% |
 | [gemm2_config_sweep](gemm2_config_sweep/) | `epilog="lds"` + `dyn_rows`：128 / 512 tokens 为 37.5 / 51.6 us（port 83.5 / 97.8） |
-| [gemm2_epilog_ablation](gemm2_epilog_ablation/) | 写回改成 atomic / store / 不写，耗时都不变：gemm2 不受写回限制 |
+| [gemm2_epilog_ablation](gemm2_epilog_ablation/) | ~~写回方式不影响耗时~~：原结论是 FlyDSL 缓存复用旧二进制造成的假象。复测（见 moe_token_scaling）：不写回时快 20–35%；store 与 atomic 一样慢 |
 | [isa_snapshots](isa_snapshots/) | 早期各 kernel 变体的 ISA 和 VGPR / spill / LDS 汇总 |
 
 ## 2. 单 kernel 融合 MoE
 
 | 实验 | 结论 |
 |---|---|
+| [fmoe_bm64](fmoe_bm64/) | BM=64 单 kernel MoE（gemm1 → 寄存器内量化 → gemm2 + atomic，256 VGPR、25 KB LDS，2 CTA/CU）。加 XCD 连续映射后，同专家的 m-block 共享 L2，8192 / 16384 tokens 比 2-kernel 快 15% / 13%，4096 快 4%。ATT 显示两个 CTA 的 VALU（解码）与 MFMA 重叠不足，是下一步的优化对象 |
 | [fmoe_single_kernel](fmoe_single_kernel/) | 融合只在 token 很少时略占优；WG 数等于 m-block 数，有长尾；强行提高 occupancy 会 spill，慢约 2 倍 |
 
 ## 3. 卡间通讯（TP8 下 gemm2 之后的 all-reduce）
@@ -73,6 +74,16 @@
 | [gemm1_wave_rounds](gemm1_wave_rounds/) | tail 只占约 5%；稳态带宽约 3.15 TB/s |
 | [gemm1_att_bottleneck](gemm1_att_bottleneck/) | VALU 发射受限：发射口约 90% 被占，fp4 解码占 VALU 的 79% |
 | [fast_decode](fast_decode/) | fd1/fd2：VALU 减少 39% / 29%，结果逐位一致，端到端快 7–11%；已接入生产路径 |
+
+## 7. 端到端 token 扩展（inter_dim 256）
+
+| 实验 | 结论 |
+|---|---|
+| [moe_token_scaling](moe_token_scaling/) | 128–16384 tokens：≤512 受带宽限制（gemm1 达 3.2–3.5 TB/s）；1024 是过渡区；≥2048 受 compute 限制，且 gemm2 逐渐主导（约 300 TFLOPs，写回占 24–35%）；最优 `block_m` 随 token 数变化；比 aiter fused_moe 快 1.34–1.96 倍 |
+| [gemm2_att](gemm2_att/) | 8192 tokens 下的 gemm2 ATT：受延迟限制（VALU 发射 48%，MFMA <5%），35% 的时间是串行 vmcnt 等待（A staging 4 次、epilogue 加载 4 次）；LDS 限制每 CU 只能放 4 个 WG；提前发出加载预计可省约 25% |
+| [gemm2_ntile](gemm2_ntile/) | 一个 CTA 处理多个 n-tile（`n_tiles`/`stage_rows`）：A 只加载一次，下一个 tile 的 W 预取，vmcnt 等待从 35% 降到 6%；但受占用率和 750 W 功耗墙限制，≤2048 tokens 只快 10–13%，≥8192 tokens 快 2–5% |
+| [atomic_bw](atomic_bw/) | bf16x2 atomic 上限约 1.5 TB/s，约为 dwordx4 store（4.3–5.4 TB/s）的 1/3。只比较写出路径时，store + reduce 处处不慢于 atomic；但考虑 gemm2 内的重叠和 reduce 重新读数据后，只有 512–1024 tokens 时 store 能省约 8 us，2048–4096 持平，≥8192 时 atomic 好 50–98 us |
+| [gemm2_bm128](gemm2_bm128/) | gemm2 的独立 BM=128 版本：每 SIMD 1 个 wave，A 存在 VGPR，靠 CTA 内的指令流水遮延迟，每行 64 B atomic 且不用 LDS。≥8192 tokens 时最快，比原版快 8–16%。计算本身只要 279 us（8192 tokens），已低于 atomic 带宽下限 352 us，因此大 token 下 gemm2 由 atomic 吞吐（约 1.3–1.5 TB/s）决定；把 atomic 改成 workgroup scope 也无效。编译期开关 `OUT_MODE="sorted"`（按 sorted 顺序 store，再做 invert + sorted_sum）在所有档位都更慢（0.79–0.89x），瓶颈是 sorted_sum 读回 topk 份数据 |
 
 ## 工具与记录
 
