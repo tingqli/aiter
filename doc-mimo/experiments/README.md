@@ -24,7 +24,8 @@
 
 | 实验 | 结论 |
 |---|---|
-| [fmoe_bm64](fmoe_bm64/) | BM=64 单 kernel MoE（gemm1 → 寄存器内量化 → gemm2 + atomic，256 VGPR、25 KB LDS，2 CTA/CU）。加 XCD 连续映射后，同专家的 m-block 共享 L2，8192 / 16384 tokens 比 2-kernel 快 15% / 13%，4096 快 4%。ATT 显示两个 CTA 的 VALU（解码）与 MFMA 重叠不足，是下一步的优化对象 |
+| [fmoe_bm64](fmoe_bm64/) | BM=64 单 kernel MoE（gemm1 → 寄存器内量化 → gemm2 + atomic，256 VGPR、25 KB LDS，2 CTA/CU）。加 XCD 连续映射后，同专家的 m-block 共享 L2，8192 / 16384 tokens 比 2-kernel 快 15% / 13%，4096 快 4%。第 3 步：lean epilogue 加 gemm1 预取分散后去掉了 spill，8192 / 16384 tokens 比 2-kernel 快 18% / 17%（kernel 691 / 1350 us）。atomic 仍多花 140–365 us，但打乱相位无效（bm64q 工作队列版本中 atomic 代价不变），说明不是爆发造成的。persistent 交织版本（1 CTA/CU）更慢；工作队列版本只在 4096 tokens 更快（+9%） |
+| [moe_2k_vs_1k](moe_2k_vs_1k/) | 2-kernel 与单 kernel 各自取最佳编译参数对比（4096/256 或 512/256/8，128–32768 tokens）。inter 256 下 ≥4096 tokens 单 kernel 快 4–15%（8192–32768 tokens 为 13–15%），≤256 tokens 慢 11%；inter 512 下单 kernel 只能用每 CU 1 个 CTA，基本没有收益（0.80–1.05x） |
 | [fmoe_single_kernel](fmoe_single_kernel/) | 融合只在 token 很少时略占优；WG 数等于 m-block 数，有长尾；强行提高 occupancy 会 spill，慢约 2 倍 |
 
 ## 3. 卡间通讯（TP8 下 gemm2 之后的 all-reduce）

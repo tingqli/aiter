@@ -26,6 +26,7 @@ LDS: A tile / bf16 staging 16 KB + fp8 half 8 KB + scales 0.5 KB = 24.5 KB.
 """
 
 import argparse
+import collections
 import functools
 import os
 import sys
@@ -41,7 +42,9 @@ from flydsl.expr.typing import Vector as Vec
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_a8w4_gemm1 as G1  # noqa: E402
+import test_a8w4_gemm2 as G2  # noqa: E402
 import test_a8w4_gemm2_bm128 as B  # noqa: E402
+from flydsl._mlir.dialects import arith, llvm  # noqa: E402
 
 import aiter  # noqa: E402
 from aiter import ActivationType, QuantType, dtypes  # noqa: E402
@@ -67,13 +70,85 @@ K_GROUPS = 2  # 128-K groups per tile
 LDS_A = BM * TILE_K1  # 16 KB: A tile, then the bf16 SiLU staging (BM x 128 x 2)
 LDS_H = BM * 128  # 8 KB: one quantized fp8 half
 LDS_BYTES = LDS_A + LDS_H + BM * 2 * 4
+# ablation knobs (experiment only; use a fresh FLYDSL_RUNTIME_CACHE_DIR per value):
+#   FMOE_ABL=nog2   skip gemm2 (gemm1 + quant only, output wrong)
+#   FMOE_LDS_PAD=n  add n bytes of LDS (e.g. 40000 -> 1 CTA per CU)
+#   G2_NO_ATOMIC=1  (test_a8w4_gemm2_bm128) skip the atomics
+ABL = os.environ.get("FMOE_ABL", "")
+ABLS = set(ABL.split(",")) - {""}  # also: nodec (gemm1 W as raw fp8), nomma (no gemm1 MFMA)
+LDS_PAD = int(os.environ.get("FMOE_LDS_PAD", "0"))
+DELAY = int(os.environ.get("FMOE_DELAY", "0"))  # x s_sleep(127) (~8k cycles each)
+# gemm1 K loop: 1 = next-tile loads spread over the K steps, W read lazily (default);
+# 0 = all loads up front after copying W out (the step-1 version)
+G1_SPREAD = os.environ.get("FMOE_G1SPREAD", "1") == "1"
+# FMOE_PROBE=1: every CTA writes i64 [start, gemm2 start, end, hw_id | xcc_id << 32]
+# (s_memrealtime, 100 MHz) at dbg[m_block * 4 ..] (see --probe)
+PROBE = os.environ.get("FMOE_PROBE", "0") == "1"
+
+
+def _now():
+    return fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
+
+
+def _getreg(simm16):
+    return fx.Int32(llvm.call_intrinsic(T.i32, "llvm.amdgcn.s.getreg",
+                                        [_raw(fx.Int32(simm16))], [], []))
+
+
+def _rnu_hi(x):
+    """f32 -> i32 whose high half is bf16(x), rounded to nearest, ties away from
+    zero (one add; differs from RNE only on exact ties)."""
+    return fx.Float32(x).bitcast(fx.Int32) + fx.Int32(0x8000)
+
+
+def _atomics4_saddr(datas, offs, out_i64):
+    """bf16x2 atomic adds of ``datas[k]`` at ``out + offs[k]`` bytes (offs >= 0,
+    per-tile i32, so the zext stays next to the atomic -> SGPR-base form)."""
+    base = G2._global_base_ptr1(out_i64)
+    for k in range_constexpr(len(offs)):
+        if const_expr(B.NO_ATOMIC):
+            continue
+        off64 = arith.ExtUIOp(T.i64, offs[k]).result
+        pk = Vec.from_elements([fx.Int32(datas[k])], fx.Int32).bitcast(fx.BFloat16)
+        llvm.AtomicRMWOp(llvm.AtomicBinOp.fadd, bo.get_element_ptr(base, byte_offset=off64),
+                         _raw(pk), llvm.AtomicOrdering.monotonic, syncscope="agent",
+                         alignment=4)
+
+
+@flyc.jit
+def _atomics_mi(datas, offs, col, out_i64, full, part):
+    """One 16-row block's atomics at ``out + offs[k] + col``. Valid rows are a prefix
+    of the expert block, so ``full`` (all 16 rows valid) and ``part`` (some valid)
+    are wave-uniform: full blocks need no per-atomic exec masking; padding rows have
+    offs < 0."""
+    if full:
+        _atomics4_saddr(datas, [_raw(fx.Int32(o) + col) for o in offs], out_i64)
+    else:
+        if part:
+            base = G2._global_base_ptr1(out_i64)
+            for k in range_constexpr(len(offs)):
+                off = fx.Int32(offs[k])
+                if off >= fx.Int32(0):
+                    off64 = arith.ExtUIOp(T.i64, _raw(off + col)).result
+                    pk = Vec.from_elements([fx.Int32(datas[k])], fx.Int32).bitcast(fx.BFloat16)
+                    llvm.AtomicRMWOp(llvm.AtomicBinOp.fadd,
+                                     bo.get_element_ptr(base, byte_offset=off64), _raw(pk),
+                                     llvm.AtomicOrdering.monotonic, syncscope="agent",
+                                     alignment=4)
 
 
 @functools.cache
 def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
-                           waves_per_eu=2, dyn_rows=True, xcd=True):
+                           waves_per_eu=2, dyn_rows=True, xcd=True, ksplit=1):
     H, INTER = D_HIDDEN, D_INTER
-    assert INTER == 256 and H % TILE_K1 == 0 and H % TILE_N2 == 0
+    assert INTER % 256 == 0 and H % TILE_K1 == 0 and H % TILE_N2 == 0
+    NH = INTER // 128  # gemm1 column chunks of 128 = gemm2 K groups (one scale each)
+    # ksplit > 1: the NH chunks of an expert block are split over ksplit CTAs; each
+    # runs gemm1 for its chunks and gemm2 over that K slice (partial sums, atomics)
+    assert NH % ksplit == 0
+    CH = NH // ksplit  # chunks per CTA
+    K2_STEPS = CH * 4  # gemm2 MFMA K steps (A2 fragments per row block)
+    LDS_BYTES_L = LDS_A + LDS_H + BM * CH * 4
     N1 = 2 * INTER  # gate | up rows of W1
     K1_TILES = H // TILE_K1
     NT2 = H // TILE_N2
@@ -84,10 +159,14 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
     SC2_STRIDE = (INTER // 256) * 64
     WS2_BYTES = NE * H * (INTER // 32)
     kname = (f"a8w4_fmoe_bm64_h{H}_i{INTER}_ne{NE}_k{TOPK}_bcm{b_cache_mod}"
-             f"_w{waves_per_eu}{'_dyn' if dyn_rows else ''}{'_xcd' if xcd else ''}")
+             f"_w{waves_per_eu}{'_dyn' if dyn_rows else ''}{'_xcd' if xcd else ''}"
+             f"{f'_ks{ksplit}' if ksplit > 1 else ''}"
+             f"{'_' + ABL.replace(',', '_') if ABL else ''}{f'_lp{LDS_PAD}' if LDS_PAD else ''}"
+             f"{'_noat' if B.NO_ATOMIC else ''}{f'_dl{DELAY}' if DELAY else ''}"
+             f"{'' if G1_SPREAD else '_g1up'}{'_probe' if PROBE else ''}")
 
     def _body(lds_ptr, arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2,
-              arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave):
+              arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave, arg_dbg, c0):
         tx = fx.Int32(gpu.thread_id("x"))
         lane_div_16 = lane // fx.Int32(16)
         lane_mod_16 = lane % fx.Int32(16)
@@ -131,7 +210,7 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                 a_dst.append((row * fx.Int32(TILE_K1) + col_b) // fx.Int32(16))
             a_regs = [fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32) for _ in range(A_LOADS)]
             lds_flat = fx.make_view(fx.recast_iter(fx.Int32, lds_ptr),
-                                    fx.make_layout(LDS_BYTES // 4, 1))
+                                    fx.make_layout(LDS_BYTES_L // 4, 1))
             lds16 = fx.logical_divide(lds_flat, fx.make_layout(4, 1))
             lds8 = fx.logical_divide(lds_flat, fx.make_layout(2, 1))
             wr_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)
@@ -139,8 +218,11 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
 
             def load_a_global(base_k):
                 for i in range_constexpr(A_LOADS):
-                    a_regs[i].store(Vec(bo.buffer_load(
-                        rs_x, a_src[i] + base_k // fx.Int32(4), vec_width=4, dtype=T.i32)))
+                    load_a_one(i, base_k)
+
+            def load_a_one(i, base_k):
+                a_regs[i].store(Vec(bo.buffer_load(
+                    rs_x, a_src[i] + base_k // fx.Int32(4), vec_width=4, dtype=T.i32)))
 
             def store_a_lds():
                 for i in range_constexpr(A_LOADS):
@@ -163,12 +245,13 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                     xs.append(ld(rs_xs, tok).bitcast(fx.Float32))
 
             a2 = {}  # gemm2 A fragments: (mi, ku) -> Vec2 i32
-            for nb in range_constexpr(2):
+            for jc in range_constexpr(CH):
+                nb = c0 + fx.Int32(jc)  # absolute 128-column chunk
                 # ---- gemm1 W1 columns (gate rows n, up rows INTER + n) -------------
                 w1_base, sc1_base = {}, {}
                 n_cols = []
                 for ni in range_constexpr(N_REPEAT):
-                    n_local = fx.Int32(nb * TILE_N1 + ni * 16) + n_wave_base
+                    n_local = nb * fx.Int32(TILE_N1) + fx.Int32(ni * 16) + n_wave_base
                     n_cols.append(n_local + lane_mod_16)
                     for gu in range_constexpr(2):
                         n0 = e * fx.Int32(N1) + n_local + fx.Int32(gu * INTER)
@@ -182,14 +265,21 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                 s_regs = {gu: fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32) for gu in range(2)}
 
                 def load_w_global(base_k):
+                    load_s(base_k)
+                    for (gu, ni, g) in w_regs:
+                        load_w_one(gu, ni, g, base_k)
+
+                def load_s(base_k):
                     for gu in range_constexpr(2):
                         s_regs[gu].store(Vec.from_elements([ld(
                             rs_ws1, sc1_base[gu] + (base_k // fx.Int32(256)) * fx.Int32(64))],
                             fx.Int32))
-                    for (gu, ni, g), r in w_regs.items():
-                        idx = w1_base[gu, ni] + (base_k // fx.Int32(128) + fx.Int32(g)) * fx.Int32(64)
-                        r.store(Vec(bo.buffer_load(rs_w1, idx * fx.Int32(4), vec_width=4,
-                                                   dtype=T.i32, cache_modifier=b_cache_mod)))
+
+                def load_w_one(gu, ni, g, base_k):
+                    idx = w1_base[gu, ni] + (base_k // fx.Int32(128) + fx.Int32(g)) * fx.Int32(64)
+                    w_regs[gu, ni, g].store(Vec(bo.buffer_load(
+                        rs_w1, idx * fx.Int32(4), vec_width=4, dtype=T.i32,
+                        cache_modifier=b_cache_mod)))
 
                 def read_w():
                     raw = {k: [fx.Int32(Vec(r.load())[j]) for j in range(4)]
@@ -209,17 +299,55 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                 for t_ in acc.values():
                     t_.store(zero4)
 
-                def compute_tile(w_tile):
-                    raw, luts = w_tile
+                def compute_tile(w_tile, nxt=None):
+                    """One 256-K tile. ``w_tile`` None: read W lazily from w_regs and,
+                    if ``nxt`` is given, issue tile nxt's loads spread over the K steps
+                    (A at K steps 0.., W group 0 once consumed at 4..7, group 1 last)."""
+                    if const_expr(w_tile is None):
+                        luts = {}
+                        for gu in range_constexpr(2):
+                            p = fx.Int32(Vec(s_regs[gu].load())[0])
+                            for ni in range_constexpr(N_REPEAT):
+                                for g in range_constexpr(K_GROUPS):
+                                    luts[gu, ni, g] = G1._fp8_lut_predelta(
+                                        G1._perm_u32(p, p, ((g % 2) * 2 + ni) * 0x01010101))
+                        if const_expr(nxt is not None):
+                            load_s(nxt)
+                        raw = None
+                    else:
+                        raw, luts = w_tile
+                    w_items = [(gu, ni) for gu in range(2) for ni in range(N_REPEAT)]
+
+                    def raw_at(gu, ni, g, j):
+                        if const_expr(raw is None):
+                            return fx.Int32(Vec(w_regs[gu, ni, g].load())[j])
+                        return raw[gu, ni, g][j]
+
                     for ku in range_constexpr(K_STEPS):
                         g, j = ku // 4, ku % 4
-                        bs = {(gu, ni): G1._fp4x8_to_fp8x8_fast(raw[gu, ni, g][j], luts[gu, ni, g])
-                              for gu in range(2) for ni in range(N_REPEAT)}
-                        for mi in range_constexpr(MR):
+                        if const_expr("nodec" in ABLS):
+                            bs = {(gu, ni): Vec.from_elements(
+                                [raw_at(gu, ni, g, j)] * 2, fx.Int32).bitcast(
+                                    fx.Float8E4M3FNUZ)
+                                for gu in range(2) for ni in range(N_REPEAT)}
+                        else:
+                            bs = {(gu, ni): G1._fp4x8_to_fp8x8_fast(raw_at(gu, ni, g, j),
+                                                                     luts[gu, ni, g])
+                                  for gu in range(2) for ni in range(N_REPEAT)}
+                        for mi in range_constexpr(MR if "nomma" not in ABLS else 0):
                             a8 = load_a(mi, ku)
                             for ni in range_constexpr(N_REPEAT):
                                 for gu in range_constexpr(2):
                                     G1._mma_fp8(mma_atom, acc[gu, mi, ni], a8, bs[gu, ni])
+                        if const_expr(nxt is not None):
+                            if const_expr(ku < A_LOADS):
+                                load_a_one(ku, nxt)
+                            if const_expr(ku >= K_STEPS - len(w_items)):
+                                gu_, ni_ = w_items[ku - (K_STEPS - len(w_items))]
+                                load_w_one(gu_, ni_, 0, nxt)
+                    if const_expr(nxt is not None):
+                        for gu_, ni_ in w_items:
+                            load_w_one(gu_, ni_, 1, nxt)
 
                 # ---- K loop: single A slot, registers prefetch tile kt+1 ----------
                 load_a_global(fx.Int32(0))
@@ -232,18 +360,21 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                         nxt = (k_first + fx.Int32(kt) + fx.Int32(1)) * fx.Int32(TILE_K1)
                         rocdl.s_waitcnt(lgkmcnt=0)
                         gpu.barrier()  # A(kt) visible
-                        w_tile = read_w()
-                        load_a_global(nxt)
-                        load_w_global(nxt)
-                        rocdl.sched_barrier(0)
-                        compute_tile(w_tile)
+                        if const_expr(G1_SPREAD):
+                            compute_tile(None, nxt)
+                        else:
+                            w_tile = read_w()
+                            load_a_global(nxt)
+                            load_w_global(nxt)
+                            rocdl.sched_barrier(0)
+                            compute_tile(w_tile)
                         gpu.barrier()  # A(kt) reads done
                         store_a_lds()
 
                 _k_loop(fx.Int32(0))
                 rocdl.s_waitcnt(lgkmcnt=0)
                 gpu.barrier()
-                compute_tile(read_w())
+                compute_tile(None if G1_SPREAD else read_w())
                 gpu.barrier()  # A reads done: the A slot becomes the bf16 staging
 
                 # ---- dequant -> SiLU -> bf16 staging [rows, 128] ---------------------
@@ -292,7 +423,7 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                     r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
                     r.store(packed)
                     fx.copy(wr_atom, r, fx.slice(lds16, (None, fx.Int32(LDS_A // 16) + dst)))
-                    sc_f[row * fx.Int32(2) + fx.Int32(nb)] = s  # 8 lanes, same value
+                    sc_f[row * fx.Int32(CH) + fx.Int32(jc)] = s  # 8 lanes, same value
                 rocdl.s_waitcnt(lgkmcnt=0)
                 gpu.barrier()
 
@@ -306,17 +437,24 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                         r = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
                         fx.copy_atom_call(rd_atom, fx.slice(
                             lds8, (None, (fx.Int32(LDS_A) + byte) // fx.Int32(8))), r)
-                        a2[mi, nb * 4 + jj] = Vec(fx.memref_load_vec(r))
+                        a2[mi, jc * 4 + jj] = Vec(fx.memref_load_vec(r))
 
-            # ---- row data (lane L = row L): ratio s0/s1, fin s1 * w, sorted id ------
+            # ---- row data (lane L = row L): ratios s_g/s_{g+1}, fin s_last * w, id ---
+            # gemm2 keeps ONE accumulator per output: at K group boundary g -> g+1 it
+            # is rescaled by s_g / s_{g+1}; the epilogue multiplies by s_last * w.
             sc_f = lds_typed_ptr(lds_i32 + fx.Int32(LDS_A + LDS_H), T.f32)
-            s0 = sc_f[lane * fx.Int32(2)]
-            s1 = sc_f[lane * fx.Int32(2) + fx.Int32(1)]
-            s1 = (s1 == fx.Float32(0.0)).select(fx.Float32(1.0), s1)
+            sg = [sc_f[lane * fx.Int32(CH) + fx.Int32(g)] for g in range(CH)]
+            sg = [sg[0]] + [(s == fx.Float32(0.0)).select(fx.Float32(1.0), s) for s in sg[1:]]
             w_r = ld(rs_sw, m_row + lane).bitcast(fx.Float32)
-            ratio_l = (s0 / s1).bitcast(fx.Int32)
-            fin_l = (s1 * w_r).bitcast(fx.Int32)
+            ratio_l = [(sg[g] / sg[g + 1]).bitcast(fx.Int32) for g in range(CH - 1)]
             id_l = ld(rs_id, m_row + lane)
+            # padding rows (a suffix of the block): fin 0, offset -1 (skipped)
+            valid_l = (id_l & fx.Int32(0x00FFFFFF)) < i32_M
+            fin_l = valid_l.select(sg[CH - 1] * w_r, fx.Float32(0.0)).bitcast(fx.Int32)
+
+            def row_valid(r):  # wave-uniform
+                t = fx.Int32(rocdl.readlane(T.i32, _raw(id_l), _raw(fx.Int32(r))))
+                return (t & fx.Int32(0x00FFFFFF)) < i32_M
 
             def fetch(q, row_static, row_lane):
                 src = fx.Int32(row_static) + row_lane
@@ -326,17 +464,27 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
             is_odd = odd == fx.Int32(1)
             col_b = (odd * fx.Int32(16) + lane_mod_16 - odd) * fx.Int32(2)
             sel_pair = is_odd.select(fx.Int32(0x03020706), fx.Int32(0x05040100))
-            ratio4, fin4, offs4 = [], [], []
+            ratio4, fin4, offs4 = [[] for _ in range(CH - 1)], [], []
             for mi in range_constexpr(MR):
-                rr, ff, oo = [], [], []
+                rr, ff, oo = [[] for _ in range(CH - 1)], [], []
                 for v in range_constexpr(4):
-                    rr.append(fetch(ratio_l, mi * 16 + v, lane_div_16 * fx.Int32(4)).bitcast(fx.Float32))
+                    for g in range_constexpr(CH - 1):
+                        rr[g].append(fetch(ratio_l[g], mi * 16 + v,
+                                           lane_div_16 * fx.Int32(4)).bitcast(fx.Float32))
                     ff.append(fetch(fin_l, mi * 16 + v, lane_div_16 * fx.Int32(4)).bitcast(fx.Float32))
                     tok = fetch(id_l, mi * 16 + v, lane_div_16 * fx.Int32(4)) & fx.Int32(0x00FFFFFF)
                     oo.append((tok < i32_M).select(tok * fx.Int32(H * 2) + col_b, fx.Int32(-1)))
-                ratio4.append(rr)
+                for g in range_constexpr(CH - 1):
+                    ratio4[g].append(rr[g])
                 fin4.append(ff)
                 offs4.append(oo)
+            mi_full = [row_valid(mi * 16 + 15) for mi in range(MR)]
+            mi_part = [row_valid(mi * 16) for mi in range(MR)]
+            if const_expr(PROBE):
+                G1.global_typed_ptr(arg_dbg, T.i64, align=8)[
+                    m_block * fx.Int32(4) + fx.Int32(1)] = _now()
+            if const_expr("nog2" in ABLS):
+                return
 
             def a_frag(mi, ku):
                 return a2[mi, ku].bitcast(fx.Float8E4M3FNUZ)
@@ -344,8 +492,8 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
             # ---- gemm2 over NT2 n-tiles: ping-pong acc sets, W2 prefetch 1 ----------
             wb = [{
                 "raw": {(ni, g): fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-                        for ni in range(N_REPEAT) for g in range(K_GROUPS)},
-                "packed": fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32),
+                        for ni in range(N_REPEAT) for g in range(CH)},
+                "packed": fx.make_rmem_tensor(fx.make_layout(CH, 1), fx.Int32),
                 "exp": fx.make_rmem_tensor(fx.make_layout(N_REPEAT, 1), fx.Int32),
             } for _ in range(2)]
             acc2 = [[[fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
@@ -358,31 +506,34 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                 for ni in range_constexpr(N_REPEAT):
                     wbase = ((n0 + fx.Int32(ni * 16)) // fx.Int32(16)) * fx.Int32(W2_K0 * 64) \
                         + lane_div_16 * fx.Int32(16) + lane_mod_16
-                    for g in range_constexpr(K_GROUPS):
+                    for g in range_constexpr(CH):
                         wb[b]["raw"][ni, g].store(Vec(bo.buffer_load(
-                            rs_w2, (wbase + fx.Int32(g * 64)) * fx.Int32(4), vec_width=4,
-                            dtype=T.i32, cache_modifier=b_cache_mod)))
+                            rs_w2, (wbase + (c0 + fx.Int32(g)) * fx.Int32(64)) * fx.Int32(4),
+                            vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod)))
                 scb = (n0 // fx.Int32(32)) * fx.Int32(SC2_STRIDE) + lane_div_16 * fx.Int32(16) \
                     + lane_mod_16
-                wb[b]["packed"].store(Vec.from_elements([ld(rs_ws2, scb)], fx.Int32))
+                # one scale dword per 256 K (4 bytes: (group % 2, ni)); one per local group
+                wb[b]["packed"].store(Vec.from_elements(
+                    [ld(rs_ws2, scb + ((c0 + fx.Int32(g)) // fx.Int32(2)) * fx.Int32(64))
+                     for g in range(CH)], fx.Int32))
                 wb[b]["exp"].store(Vec.from_elements(
                     [ld(rs_e2, n0 + fx.Int32(ni * 16) + lane_mod_16) for ni in range(N_REPEAT)],
                     fx.Int32))
 
-            def epilogue_mi(s, t_prev, mi):
+            def epilogue_mi(s, t_prev, mi, ks=(0, 1, 2, 3)):
                 fn = Vec(fn2[s].load())
                 datas = []
-                for k in range_constexpr(4):
-                    r0 = B._rne_hi(Vec(acc2[s][mi][0].load())[k] * (fin4[mi][k] * fn[0]))
-                    r1 = B._rne_hi(Vec(acc2[s][mi][1].load())[k] * (fin4[mi][k] * fn[1]))
+                for k in ks:
+                    r0 = _rnu_hi(Vec(acc2[s][mi][0].load())[k] * (fin4[mi][k] * fn[0]))
+                    r1 = _rnu_hi(Vec(acc2[s][mi][1].load())[k] * (fin4[mi][k] * fn[1]))
                     pk = G1._perm_u32(r1, r0, 0x07060302)
                     nbr = fx.Int32(rocdl.update_dpp(T.i32, _raw(pk.bitcast(fx.Int32)),
                                                     _raw(pk.bitcast(fx.Int32)),
                                                     B.DPP_QUAD_SWAP, 0xF, 0xF, True))
                     datas.append(_raw(G1._perm_u32(nbr, pk, sel_pair).bitcast(fx.Int32)))
-                base = fx.Int64(arg_out) + fx.Int64((t_prev * fx.Int32(TILE_N2) + n_wave_base)
-                                                    * fx.Int32(2))
-                B._atomics4(datas, [_raw(o) for o in offs4[mi]], base)
+                col = (t_prev * fx.Int32(TILE_N2) + n_wave_base) * fx.Int32(2)
+                _atomics_mi(datas, [_raw(offs4[mi][k]) for k in ks], col, arg_out,
+                            mi_full[mi], mi_part[mi])
 
             def tile(t, s, b, prev, has_next):
                 """n-tile t into acc set s from W buffer b; prev = (set, t_prev) whose
@@ -392,30 +543,52 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                     issue_w2(t + fx.Int32(1), 1 - b)
                 raw = {k: [fx.Int32(Vec(r.load())[j]) for j in range(4)]
                        for k, r in wb[b]["raw"].items()}
-                p = fx.Int32(Vec(wb[b]["packed"].load())[0])
+                pk_s = Vec(wb[b]["packed"].load())
                 ex = Vec(wb[b]["exp"].load())
                 fn2[s].store(Vec.from_elements(
                     [G1._channel_factor(fx.Int32(ex[ni])) for ni in range(N_REPEAT)], fx.Float32))
-                luts = [[G1._fp8_lut_predelta(G1._perm_u32(p, p, ((g % 2) * 2 + ni) * 0x01010101))
-                         for g in range(K_GROUPS)] for ni in range(N_REPEAT)]
+                luts = []
+                for ni in range_constexpr(N_REPEAT):
+                    row_l = []
+                    for g in range_constexpr(CH):
+                        p = fx.Int32(pk_s[g])
+                        sel = (((c0 + fx.Int32(g)) % fx.Int32(2)) * fx.Int32(2) + fx.Int32(ni)) \
+                            * fx.Int32(0x01010101)
+                        row_l.append(G1._fp8_lut_predelta(G1._perm_u32(p, p, sel)))
+                    luts.append(row_l)
                 for mi in range_constexpr(MR):
                     for ni in range_constexpr(N_REPEAT):
                         acc2[s][mi][ni].store(zero4)
-                for ku in range_constexpr(K_STEPS):
-                    if const_expr(ku == 4):  # acc = acc0 * s0/s1, then K group 1
+                # previous tile's epilogue: its MR*4 row atomics spread over the K steps
+                units = MR * 4
+                epi_at = [[u for u in range(units) if u * K2_STEPS // units == ku]
+                          for ku in range(K2_STEPS)]
+                for ku in range_constexpr(K2_STEPS):
+                    if const_expr(ku > 0 and ku % 4 == 0):  # K group boundary: rescale
+                        g_prev = ku // 4 - 1
                         for mi in range_constexpr(MR):
                             for ni in range_constexpr(N_REPEAT):
                                 a4 = Vec(acc2[s][mi][ni].load())
                                 acc2[s][mi][ni].store(Vec.from_elements(
-                                    [a4[v] * ratio4[mi][v] for v in range(4)], fx.Float32))
-                    b8s = [G1._fp4x8_to_fp8x8_fast(raw[ni, ku // 4][ku % 4], luts[ni][ku // 4])
-                           for ni in range(N_REPEAT)]
+                                    [a4[v] * ratio4[g_prev][mi][v] for v in range(4)],
+                                    fx.Float32))
+                    if const_expr("g2nodec" in ABLS):
+                        b8s = [Vec.from_elements([raw[ni, ku // 4][ku % 4]] * 2, fx.Int32)
+                               .bitcast(fx.Float8E4M3FNUZ) for ni in range(N_REPEAT)]
+                    else:
+                        b8s = [G1._fp4x8_to_fp8x8_fast(raw[ni, ku // 4][ku % 4],
+                                                        luts[ni][ku // 4])
+                               for ni in range(N_REPEAT)]
                     for mi in range_constexpr(MR):
                         a8 = a_frag(mi, ku)
                         for ni in range_constexpr(N_REPEAT):
                             G1._mma_fp8(mma_atom, acc2[s][mi][ni], a8, b8s[ni])
-                    if const_expr(prev is not None and ku < MR):
-                        epilogue_mi(prev[0], prev[1], ku)
+                    if const_expr(prev is not None):
+                        us = epi_at[ku]
+                        for mi_ in range_constexpr(MR):
+                            ks = tuple(u % 4 for u in us if u // 4 == mi_)
+                            if const_expr(len(ks) > 0):
+                                epilogue_mi(prev[0], prev[1], mi_, ks)
 
             issue_w2(fx.Int32(0), 0)
             tile(fx.Int32(0), 0, 0, None, True)
@@ -452,43 +625,65 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
 
     @fx.struct
     class SharedStorage:
-        raw: fx.Array[fx.Uint8, LDS_BYTES, 16]
+        raw: fx.Array[fx.Uint8, LDS_BYTES_L + LDS_PAD, 16]
 
     @flyc.jit
     def _entry(arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M):
+               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg):
         lds_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         tx = fx.Int32(gpu.thread_id("x"))
         bx = fx.Int32(gpu.block_id("x"))
         lane = tx % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx // fx.Int32(64))
         total_m = _global_i32_at(arg_cumsum, fx.Int32(0)) // fx.Int32(BM)
-        if bx < total_m:
-            m_block = bx
+        if const_expr(DELAY):
+            # stagger experiment: CTAs 304..607 (presumably each CU's 2nd slot) start late
+            if bx >= fx.Int32(304):
+                if bx < fx.Int32(608):
+                    for _ in range_constexpr(DELAY):
+                        rocdl.s_sleep(127)
+        if bx < total_m * fx.Int32(ksplit):
+            lid = bx
             if const_expr(xcd):
                 # WGs go round-robin over the 8 XCDs: give XCD x a contiguous range of
-                # m-blocks so same-expert blocks share its L2.
+                # (m-block, split) work items so same-expert blocks share its L2.
+                tot = total_m * fx.Int32(ksplit)
                 xc = _umod(bx, 8)
-                m_block = (xc * _udiv(total_m, 8) + fx.min(xc, _umod(total_m, 8))
-                           + _udiv(bx, 8))
+                lid = (xc * _udiv(tot, 8) + fx.min(xc, _umod(tot, 8)) + _udiv(bx, 8))
+            m_block = lid // fx.Int32(ksplit)
+            c0 = (lid % fx.Int32(ksplit)) * fx.Int32(CH)
+            if const_expr(PROBE):
+                dbg = G1.global_typed_ptr(arg_dbg, T.i64, align=8)
+                dbg[m_block * fx.Int32(4)] = _now()
+                hw = _getreg(0xF804)  # HW_REG_HW_ID
+                xc_id = _getreg(0xF814)  # HW_REG_XCC_ID
+                dbg[m_block * fx.Int32(4) + fx.Int32(3)] = (
+                    fx.Int64(arith.ExtUIOp(T.i64, _raw(hw)).result)
+                    + fx.Int64(arith.ExtUIOp(T.i64, _raw(xc_id)).result) * fx.Int64(1 << 32))
             _body(lds_ptr, arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2,
-                  arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave)
+                  arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave, arg_dbg, c0)
+            if const_expr(PROBE):
+                rocdl.s_waitcnt(vmcnt=0)
+                gpu.barrier()
+                G1.global_typed_ptr(arg_dbg, T.i64, align=8)[
+                    m_block * fx.Int32(4) + fx.Int32(2)] = _now()
 
     @flyc.kernel(name=kname, known_block_size=[256, 1, 1])
     def kernel(arg_x: fx.Int64, arg_xs: fx.Int64, arg_w1: fx.Int64, arg_ws1: fx.Int64,
                arg_exp1: fx.Int64, arg_w2: fx.Int64, arg_ws2: fx.Int64, arg_eids: fx.Int64,
                arg_cumsum: fx.Int64, arg_stids: fx.Int64, arg_sw: fx.Int64,
-               arg_out: fx.Int64, i32_M: fx.Int32):
+               arg_out: fx.Int64, i32_M: fx.Int32, arg_dbg: fx.Int64):
         _entry(arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M)
+               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg)
 
     @flyc.jit
     def launch(arg_x: fx.Int64, arg_xs: fx.Int64, arg_w1: fx.Int64, arg_ws1: fx.Int64,
                arg_exp1: fx.Int64, arg_w2: fx.Int64, arg_ws2: fx.Int64, arg_eids: fx.Int64,
                arg_cumsum: fx.Int64, arg_stids: fx.Int64, arg_sw: fx.Int64,
-               arg_out: fx.Int64, i32_M: fx.Int32, i32_grid: fx.Int32, stream: fx.Stream):
+               arg_out: fx.Int64, i32_M: fx.Int32, arg_dbg: fx.Int64, i32_grid: fx.Int32,
+               stream: fx.Stream):
         kernel(arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M,
+               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg,
                value_attrs={"rocdl.waves_per_eu": waves_per_eu},
                ).launch(grid=(fx.Int64(i32_grid), 1, 1), block=(256, 1, 1), stream=stream)
 
@@ -496,25 +691,80 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
 
 
 def a8w4_fmoe_bm64(x_fp8, x_scale, weights, sorted_ids, sorted_weights,
-                   sorted_expert_ids, num_valid_ids, out, *, topk=8, b_cache_mod=2,
-                   waves_per_eu=2, dyn_rows=True, xcd=True):
+                   sorted_expert_ids, num_valid_ids, out, *, topk=8, b_cache_mod=1,
+                   waves_per_eu=2, dyn_rows=True, xcd=True, ksplit=1):
     """Fused stage1 + stage2. ``weights``: ``a8w4_prepare_weights(..., fast_dec=2)``
     (doc-mimo/kernels/test_flydsl_moe_a16wfp4.py); sorting block_m 64; ``out`` bf16
-    [tokens, model_dim] zeroed (moe_sorting's moe_buf)."""
+    [tokens, model_dim] zeroed (moe_sorting's moe_buf). ``ksplit``: CTAs per expert
+    block (each takes inter_dim / ksplit columns; more CTAs for small batches)."""
     assert weights["w1_fast_dec"] == 2 and weights["w2_fast_dec"] == 2
     tokens, model_dim = out.shape
     E, _, _ = weights["w2"].shape
     launch = compile_a8w4_fmoe_bm64(
         D_HIDDEN=model_dim, D_INTER=weights["w1"].shape[1] // 2, NE=E, TOPK=topk,
-        b_cache_mod=b_cache_mod, waves_per_eu=waves_per_eu, dyn_rows=dyn_rows, xcd=xcd)
+        b_cache_mod=b_cache_mod, waves_per_eu=waves_per_eu, dyn_rows=dyn_rows, xcd=xcd,
+        ksplit=ksplit)
     _run_compiled(
         launch, x_fp8.data_ptr(), x_scale.data_ptr(), weights["w1"].data_ptr(),
         weights["w1_scale"].data_ptr(), weights["w1_exp"].data_ptr(),
         weights["w2"].data_ptr(), weights["w2_scale"].data_ptr(),
         sorted_expert_ids.data_ptr(), num_valid_ids.data_ptr(), sorted_ids.data_ptr(),
         sorted_weights.data_ptr(), out.data_ptr(), int(tokens),
-        int(sorted_expert_ids.numel()), torch.cuda.current_stream())
+        _probe_buf(sorted_expert_ids.numel()).data_ptr() if PROBE else 0,
+        int(sorted_expert_ids.numel()) * ksplit, torch.cuda.current_stream())
     return out
+
+
+_PROBE = {}
+
+
+def _probe_buf(n):
+    if _PROBE.get("buf") is None or _PROBE["buf"].numel() < n * 4:
+        _PROBE["buf"] = torch.zeros(n * 4, dtype=torch.int64, device="cuda")
+    return _PROBE["buf"]
+
+
+def probe_report():
+    """Phase timeline from the last FMOE_PROBE launch (s_memrealtime = 100 MHz)."""
+    d = _PROBE["buf"].view(-1, 4).cpu()
+    d = d[d[:, 2] != 0]
+    n_blocks = d.shape[0]
+    t0 = int(d[:, 0].min())
+    st, g2, en = [(d[:, i] - t0).double() / 100.0 for i in range(3)]  # us
+    span = float(en.max())
+    g1d, g2d = (g2 - st), (en - g2)
+    print(f"   probe: span {span:.1f} us; per CTA gemm1 {g1d.median():.1f} us, "
+          f"gemm2 {g2d.median():.1f} us (p10/p90 {g2d.quantile(0.1):.1f}/{g2d.quantile(0.9):.1f})")
+    nb = 20
+    in_g1, in_g2 = [], []
+    for k in range(nb):
+        t = span * (k + 0.5) / nb
+        in_g1.append(int(((st <= t) & (t < g2)).sum()))
+        in_g2.append(int(((g2 <= t) & (t < en)).sum()))
+    print(f"   CTAs in gemm1 over time: {in_g1}")
+    print(f"   CTAs in gemm2 over time: {in_g2}")
+    # CU pairing: CTAs whose lifetimes overlap on the same (xcc, se, sh, cu)
+    hw = d[:, 3]
+    cu = ((hw >> 32) * 4096 + ((hw >> 8) & 0xF) + ((hw >> 12) & 1) * 16 + ((hw >> 13) & 7) * 32)
+    first = st < span * 0.02
+    per_cu = collections.Counter(cu[first].tolist())
+    print(f"   CUs used at start {len(per_cu)}, CTAs/CU at start: "
+          f"{collections.Counter(per_cu.values())}")
+    # phase overlap: fraction of a CTA's gemm2 time during which its CU partner is in gemm1
+    by_cu = collections.defaultdict(list)
+    for i in range(n_blocks):
+        by_cu[int(cu[i])].append(i)
+    ov = tot = 0.0
+    for ids in by_cu.values():
+        for i in ids:
+            for j in ids:
+                if i == j:
+                    continue
+                a, b = float(g2[i]), float(en[i])
+                c, e_ = float(st[j]), float(g2[j])
+                ov += max(0.0, min(b, e_) - max(a, c))
+            tot += float(en[i] - g2[i])
+    print(f"   gemm2 time overlapped by a same-CU partner's gemm1: {100 * ov / tot:.1f}%")
 
 
 def fused_moe_a8w4_bm64(x, weights, topk_weights, topk_ids, **kw):
@@ -544,8 +794,9 @@ def _stage(name):
     return "quant" if name == "kernel_0" else "other"
 
 
-def _profile(fn, iters=10):
-    fn()
+def _profile(fn, iters=30, warmup=20):
+    for _ in range(warmup):
+        fn()
     torch.cuda.synchronize()
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as p:
         for _ in range(iters):
@@ -564,7 +815,9 @@ def main():
     p.add_argument("-t", type=int, nargs="*", default=[512, 2048, 4096, 8192, 16384])
     p.add_argument("--wpe", type=int, nargs="*", default=[2])
     p.add_argument("--xcd", type=int, nargs="*", default=[1])
+    p.add_argument("--bcm", type=int, nargs="*", default=[1], help="W1/W2 load cache modifier")
     p.add_argument("--ref", action="store_true", help="also check vs the torch reference")
+    p.add_argument("--reps", type=int, default=1, help="fused timing repeats (median)")
     args = p.parse_args()
 
     import test_flydsl_moe_a16wfp4 as M  # 2-kernel pipeline + weight prep
@@ -602,19 +855,31 @@ def main():
                                    w2_scale=w2s.view(E, MD, INTER // 32), a2_scale=None,
                                    doweight=True).float()
             line[0] += f" ref cos {G1._cos_diff(ref, o2):.1e}"
-        for wpe, xcd in [(w, c) for w in args.wpe for c in args.xcd]:
-            fn = lambda: fused_moe_a8w4_bm64(x, W, tw, ti, waves_per_eu=wpe, xcd=bool(xcd))  # noqa: E731
+        for wpe, xcd, bcm in [(w, c, m) for w in args.wpe for c in args.xcd for m in args.bcm]:
+            fn = lambda: fused_moe_a8w4_bm64(x, W, tw, ti, waves_per_eu=wpe, xcd=bool(xcd),  # noqa: E731
+                                             b_cache_mod=bcm)
             try:
                 o = fn().float().clone()
-                tf = _profile(fn)
+                runs = sorted((_profile(fn) for _ in range(args.reps)), key=lambda r: r["total"])
+                tf = runs[len(runs) // 2]
                 c = G1._cos_diff(o2, o)
                 bad = "" if c < 1e-4 else " BAD"
                 extra = f" ref cos {G1._cos_diff(ref, o):.1e}" if args.ref else ""
-                line.append(f"fused w{wpe} xcd{xcd} {tf['total']:7.1f} us (kernel {tf.get('fused', 0):.1f}) "
+                line.append(f"fused w{wpe} xcd{xcd} bcm{bcm} {tf['total']:7.1f} us (kernel {tf.get('fused', 0):.1f}) "
                             f"{t2['total'] / tf['total']:.2f}x  cos vs 2-kernel {c:.1e}{bad}{extra}")
+                if PROBE:
+                    for _ in range(10):
+                        fn()
+                    _PROBE["buf"].zero_()
+                    fn()
+                    torch.cuda.synchronize()
+                    print("\n   ".join(line), flush=True)
+                    line = []
+                    probe_report()
             except Exception as ex:  # noqa: BLE001
                 line.append(f"fused w{wpe} FAIL {type(ex).__name__}: {str(ex)[:300]}")
-        print("\n   ".join(line), flush=True)
+        if line:
+            print("\n   ".join(line), flush=True)
 
 
 if __name__ == "__main__":

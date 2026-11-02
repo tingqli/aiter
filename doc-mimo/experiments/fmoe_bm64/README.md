@@ -1,6 +1,33 @@
 # fmoe_bm64：BM=64 单 kernel MoE（gemm1 → 量化 → gemm2 + atomic，2 CTA/CU）
 
-## 结论
+## 第 3 步结论（优化与 persistent 尝试，`results/step3.log`）
+
+- **当前最好：`test_a8w4_fmoe_bm64.py`（非 persistent）。** kernel 时间 8192 tokens 691 us，16384 tokens 1350 us；总时间比 2-kernel 快 **18% / 17%**，512–4096 tokens 与 2-kernel 持平。和第 2 步相比做了这些改动：
+  - **lean epilogue：** 整数舍入，padding 行的 atomic 用 wave 一致的 full/part 分支，atomic 用 SGPR base；
+  - **gemm1 预取分散：** 下一 tile 的 A/W 读取分散到各 K step 发出，W 不再整体拷出，**21 个 spill 消失**；
+  - **W 读取 cache policy 改为 sc0（bcm1）。**
+- **atomic 仍是大头，但原因不是「相位锁定」。**
+  - 去掉 atomic 后，8192 / 16384 tokens 的 kernel 降到 551 / 985 us，说明 atomic 要多花 140 / 365 us。
+  - 相位探针（`FMOE_PROBE=1`）显示 CTA 在全 GPU 范围确实同相：开头约 180 us 全部 608 个 CTA 都在 gemm1，之后 gemm2 成批出现。
+  - 但打乱相位并没有收益：推迟第二个 slot 启动（`FMOE_DELAY`）无效；工作队列版本 bm64q 让 gemm1/gemm2 在时间上均匀混合，atomic 的代价仍然约 150 us（noat 589 → 740）。
+  - 所以 atomic 的开销是它本身的发射和访存代价（atomic 在内存端做 RMW，与 W 读取争抢带宽和功耗），而不是集中爆发造成的。
+- **bm64p（persistent，1 CTA/CU，gemm2(i-1) 按 K step 交织进 gemm1(i)）更慢：** 8192 tokens 872–916 us。
+  - 每个 SIMD 只有 1 个 wave，同一指令流里 VALU（解码、epilogue）和 MFMA 基本是串行的：VALU 发射占用 34%，MFMA 约 38%；
+  - 寄存器 488–512，无分支 atomic 版本还有 spill。
+- **bm64q（persistent 工作队列，2 CTA/CU）：** 每个 XCD 一个队列，顺序是 g1 × D，然后 g2 / g1 交替，最后是 g2；A2 经 L2 传递，每个 block 一个 epoch 标志。
+  - **4096 tokens 最好：** kernel 442 us，bm64 是 485 us（快 9%，主要来自任务粒度更细、尾部更均衡）。
+  - 8192 / 16384 tokens 比 bm64 慢 2–5%（任务调度的 barrier、10 个 spill）；512 tokens 慢 18%（每个 CTA 只有约 1 个任务，persistent 没有收益）。
+  - **同步不能用 agent 级 release/acquire：** `buffer_inv sc1` 会把 XCD 的 L2（缓存着的专家权重）整个作废，8192 tokens 时慢 36 us。producer 和 consumer 在同一个 XCD（按 `HW_REG_XCC_ID` 选队列）时，用 sc1 store/load 标志即可。
+- **踩过的坑：**
+  - 在带 `s_barrier` 的 runtime `while` 循环里使用 lane 级发散分支（`if tx == 0`），会被 structurizer 拆成不同 wave 执行次数不同的 barrier，导致 hang。要改成 `if wave == 0` 加按 lane 选择的增量。
+  - 循环上界必须 `readfirstlane`。
+  - gfx942 上 `v2bf16` 的 buffer atomic fadd 无法选指令（isel 失败）。
+- **按 token 数分档建议（第 4 步）：**
+  - ≤2048 tokens 用 2-kernel 或 bm64（两者持平）；
+  - 4096 tokens 用 bm64q；
+  - ≥8192 tokens 用 bm64。
+
+## 第 1–2 步结论
 
 - **正确性：** 与 2-kernel 输出的 cos 差 ≤1.2e-5；与 torch 参考的 cos 差 9.8e-4，和 2-kernel 相同。
 - **性能（总时间含 sort + quant，单位 us）：** 加上 XCD 连续映射（`xcd=True`，默认）后，≥4096 tokens 都比 2-kernel 快，8192 / 16384 tokens 快 13–15%。
@@ -47,3 +74,13 @@ python doc-mimo/experiments/fmoe_bm64/att_phases.py ck_test_fmoe/ui_output_agent
 
 - `bench.log`：计时、误差、ISA 资源。
 - `att_8192_xcd0.txt`：8192 tokens（xcd0）的 ATT 阶段拆分、驻留情况、SIMD 发射占用。
+- `step3.log`：第 3 步的全部数据，包括优化后的 bm64、消融、相位探针、DELAY、bm64p、bm64q。
+
+第 3 步相关的 kernel 与脚本：
+
+| 文件 | 内容 |
+|---|---|
+| `doc-mimo/kernels/test_a8w4_fmoe_bm64.py` | 开关：`FMOE_PROBE=1`（相位探针，打印每段时间线）、`FMOE_ABL=nog2/nodec/nomma/g2nodec`、`FMOE_DELAY`、`FMOE_LDS_PAD`、`FMOE_G1SPREAD`、`G2_NO_ATOMIC`；CLI 参数 `--bcm`、`--reps` |
+| `doc-mimo/kernels/test_a8w4_fmoe_bm64p.py` | persistent 交织版本（较慢，仅作记录） |
+| `doc-mimo/kernels/test_a8w4_fmoe_bm64q.py` | persistent 工作队列版本，`-t ... [--no_bm64]`；调试开关 `FMOEQ_DBG=trace/skipg1/skipg2` |
+| `dbg_queue_trace.py` | 配合 `FMOEQ_DBG=trace`，检查每个 block 是否恰好执行一次 g1、一次 g2 |
