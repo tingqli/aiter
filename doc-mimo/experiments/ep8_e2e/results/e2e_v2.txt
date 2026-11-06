@@ -1,0 +1,45 @@
+tokens     16: rows     13 act 11 max     2 | mem    40.9 fp8     0.6 bf16     1.1 us
+   fp8  s16  :     71.9 us | x1.76 mem x118.26 comp x1.73 sum | cos 6.5e-05 | prep    9.6 g1   36.8 g2   21.8
+   fp8  s32  :     76.4 us | x1.87 mem x125.65 comp x1.84 sum | cos 6.5e-05 | prep    9.7 g1   36.1 g2   23.6
+   fp8  m64  :     81.9 us | x2.00 mem x134.74 comp x1.97 sum | cos 6.5e-05 | prep   10.1 g1   42.1 g2   27.2
+   fp8  l128 :     69.5 us | x1.70 mem x114.31 comp x1.67 sum | cos 6.5e-05 | prep    9.1 g1   35.1 g2   21.8
+   bf16 s16  :     71.5 us | x1.75 mem x67.05 comp x1.70 sum | cos 2.0e-06 | prep    5.6 g1   40.6 g2   23.8
+   bf16 s32  :     81.6 us | x2.00 mem x76.52 comp x1.94 sum | cos 2.0e-06 | prep    5.2 g1   45.4 g2   29.5
+   bf16 m64  :    104.4 us | x2.55 mem x97.87 comp x2.49 sum | cos 2.0e-06 | prep    5.2 g1   59.3 g2   38.2
+   bf16 l128 :     77.3 us | x1.89 mem x72.42 comp x1.84 sum | cos 2.0e-06 | prep    6.0 g1   42.8 g2   25.3
+tokens    256: rows    244 act 32 max    14 | mem   119.9 fp8    11.4 bf16    20.0 us
+   fp8  s16  :    146.5 us | x1.22 mem x12.83 comp x1.12 sum | cos 6.3e-05 | prep   10.5 g1   84.4 g2   47.5
+   fp8  s32  :    157.4 us | x1.31 mem x13.79 comp x1.20 sum | cos 6.3e-05 | prep   11.0 g1   89.4 g2   53.1
+   fp8  m64  :    180.7 us | x1.51 mem x15.83 comp x1.38 sum | cos 6.3e-05 | prep   10.6 g1  104.9 g2   62.1
+   fp8  l128 :    159.1 us | x1.33 mem x13.94 comp x1.21 sum | cos 6.3e-05 | prep   10.4 g1   91.5 g2   52.1
+   bf16 s16  :    163.7 us | x1.37 mem x8.18 comp x1.17 sum | cos 2.4e-06 | prep    7.0 g1   97.8 g2   53.4
+   bf16 s32  :    185.1 us | x1.54 mem x9.25 comp x1.32 sum | cos 2.4e-06 | prep    7.8 g1  109.7 g2   62.4
+   bf16 m64  :    256.4 us | x2.14 mem x12.81 comp x1.83 sum | cos 2.4e-06 | prep    7.3 g1  155.3 g2   88.0
+   bf16 l128 :    191.6 us | x1.60 mem x9.57 comp x1.37 sum | cos 2.4e-06 | prep    8.7 g1  111.1 g2   63.0
+tokens   1024: rows    986 act 32 max    48 | mem   123.1 fp8    46.1 bf16    80.9 us
+   fp8  s16  :    262.2 us | x2.13 mem x5.68 comp x1.55 sum | cos 6.8e-05 | prep   25.9 g1  158.6 g2   82.9
+   fp8  s32  :    215.0 us | x1.75 mem x4.66 comp x1.27 sum | cos 6.8e-05 | prep   11.7 g1  127.9 g2   64.6
+   fp8  m64  :    204.2 us | x1.66 mem x4.43 comp x1.21 sum | cos 6.8e-05 | prep   12.0 g1  113.5 g2   64.8
+   fp8  l128 :    180.4 us | x1.47 mem x3.91 comp x1.07 sum | cos 6.8e-05 | prep   12.2 g1  105.3 g2   60.9
+   bf16 s16  :    299.6 us | x2.44 mem x3.70 comp x1.47 sum | cos 2.5e-06 | prep   11.3 g1  174.2 g2   96.3
+   bf16 s32  :    249.1 us | x2.02 mem x3.08 comp x1.22 sum | cos 2.5e-06 | prep    9.5 g1  156.1 g2   79.9
+   bf16 m64  :    300.3 us | x2.44 mem x3.71 comp x1.47 sum | cos 2.5e-06 | prep   10.3 g1  167.9 g2   95.2
+   bf16 l128 :    249.8 us | x2.03 mem x3.09 comp x1.22 sum | cos 2.5e-06 | prep   11.7 g1  147.6 g2   82.0
+tokens   4096: rows   4164 act 32 max   154 | mem   136.0 fp8   194.8 bf16   341.7 us
+   fp8  s16  :    956.8 us | x7.03 mem x4.91 comp x2.89 sum | cos 6.8e-05 | prep   34.3 g1  641.1 g2  287.8
+   fp8  s32  :    600.9 us | x4.42 mem x3.08 comp x1.82 sum | cos 6.8e-05 | prep   34.5 g1  368.5 g2  177.6
+   fp8  m64  :    473.0 us | x3.48 mem x2.43 comp x1.43 sum | cos 6.8e-05 | prep   29.9 g1  270.0 g2  143.3
+   fp8  l128 :    473.2 us | x3.48 mem x2.43 comp x1.43 sum | cos 6.8e-05 | prep   28.2 g1  270.4 g2  167.8
+   bf16 s16  :   1017.5 us | x7.48 mem x2.98 comp x2.13 sum | cos 2.6e-06 | prep   12.3 g1  642.3 g2  348.7
+   bf16 s32  :    707.3 us | x5.20 mem x2.07 comp x1.48 sum | cos 2.6e-06 | prep   12.6 g1  431.2 g2  231.0
+   bf16 m64  :    687.7 us | x5.06 mem x2.01 comp x1.44 sum | cos 2.6e-06 | prep   10.3 g1  426.3 g2  239.9
+   bf16 l128 :    701.5 us | x5.16 mem x2.05 comp x1.47 sum | cos 2.6e-06 | prep   10.2 g1  446.4 g2  244.6
+tokens  16384: rows  16491 act 32 max   558 | mem   187.2 fp8   771.5 bf16  1353.2 us
+   fp8  s16  :   3537.6 us | x18.90 mem x4.59 comp x3.69 sum | cos 6.7e-05 | prep   70.1 g1 2496.5 g2  955.8
+   fp8  s32  :   2132.9 us | x11.39 mem x2.76 comp x2.22 sum | cos 6.7e-05 | prep   74.7 g1 1416.2 g2  676.6
+   fp8  m64  :   1457.4 us | x7.78 mem x1.89 comp x1.52 sum | cos 6.7e-05 | prep   69.3 g1  925.9 g2  433.0
+   fp8  l128 :   1266.7 us | x6.77 mem x1.64 comp x1.32 sum | cos 6.7e-05 | prep   62.9 g1  702.1 g2  486.8
+   bf16 s16  :   4145.9 us | x22.15 mem x3.06 comp x2.69 sum | cos 2.6e-06 | prep   14.1 g1 2641.4 g2 1435.2
+   bf16 s32  :   2543.3 us | x13.58 mem x1.88 comp x1.65 sum | cos 2.6e-06 | prep   14.8 g1 1599.0 g2  901.7
+   bf16 m64  :   1996.9 us | x10.67 mem x1.48 comp x1.30 sum | cos 2.6e-06 | prep   12.6 g1 1258.7 g2  690.7
+   bf16 l128 :   1850.3 us | x9.88 mem x1.37 comp x1.20 sum | cos 2.6e-06 | prep   13.0 g1 1145.6 g2  664.8

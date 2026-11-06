@@ -86,6 +86,16 @@
 | [atomic_bw](atomic_bw/) | bf16x2 atomic 上限约 1.5 TB/s，约为 dwordx4 store（4.3–5.4 TB/s）的 1/3。只比较写出路径时，store + reduce 处处不慢于 atomic；但考虑 gemm2 内的重叠和 reduce 重新读数据后，只有 512–1024 tokens 时 store 能省约 8 us，2048–4096 持平，≥8192 时 atomic 好 50–98 us |
 | [gemm2_bm128](gemm2_bm128/) | gemm2 的独立 BM=128 版本：每 SIMD 1 个 wave，A 存在 VGPR，靠 CTA 内的指令流水遮延迟，每行 64 B atomic 且不用 LDS。≥8192 tokens 时最快，比原版快 8–16%。计算本身只要 279 us（8192 tokens），已低于 atomic 带宽下限 352 us，因此大 token 下 gemm2 由 atomic 吞吐（约 1.3–1.5 TB/s）决定；把 atomic 改成 workgroup scope 也无效。编译期开关 `OUT_MODE="sorted"`（按 sorted 顺序 store，再做 invert + sorted_sum）在所有档位都更慢（0.79–0.89x），瓶颈是 sorted_sum 读回 topk 份数据 |
 
+## 8. EP8（专家并行，每卡 32 个专家、inter 2048），a8w4 与 a16w4
+
+完整设计见 `doc-mimo/README.md` 第 8 节。
+
+| 实验 | 结论 |
+|---|---|
+| [ep8_roofline](ep8_roofline/) | 750 W 功耗墙下的实测上限：HBM 纯读 3.6 TB/s；hipBLASLt fp8 1117 / 1002 TF（gemm1 / gemm2 形状），bf16 637 / 571 TF；时钟只有 1.2–1.4 GHz |
+| [ep8_baseline](ep8_baseline/) | TP 调好的 a8w4 2-kernel 直接跑 EP8 shape：16 tokens 149 us、4096 tokens 668 us、16384 tokens 2275 us；EP8 专用 kernel 快 1.2–2.4 倍 |
+| [ep8_e2e](ep8_e2e/) | EP8 专用 3-launch（prep → gemm1 → gemm2）：a8w4 / a16w4 在 16 tokens 63 / 74 us（1.5 / 1.8 倍 mem 下限），1024 tokens 183 / 244 us（1.08 / 1.19 倍 mem + 计算），16384 tokens 1306 / 1767 us（1.7 / 1.3 倍计算下限）。本轮：`_opaque_tx` 消除全部 spill；prep 生成按代价切段 + 重块优先的 tile 调度（4096 tokens −9% / −14%，热点路由不退化）；≤8 tokens 的窄 tile 配置（a16w4 −20–26%）；按 token 数自动选配置。per-XCD atomic 工作队列、persistent、专家整块分 XCD 等方案都试过并放弃 |
+
 ## 工具与记录
 
 | 路径 | 用途 |

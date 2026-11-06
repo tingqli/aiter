@@ -1,0 +1,14 @@
+hbm read   408 MB:    118.8 us   3.60 TB/s   720 W  1390 MHz
+hbm read  1024 MB:    294.7 us   3.64 TB/s   740 W  1288 MHz
+fp8  gemm   8192x 8192x 8192:    915.4 us  1201.2 TFLOPs   727 W  1222 MHz
+fp8  gemm   4096x 4096x 4096:    145.4 us   945.1 TFLOPs   735 W  1353 MHz
+fp8  gemm  16384x 4096x 4096:    492.2 us  1117.0 TFLOPs   740 W  1203 MHz
+fp8  gemm  16384x 4096x 2048:    274.2 us  1002.4 TFLOPs   746 W  1319 MHz
+fp8  gemm    512x 4096x 4096:     29.3 us   586.0 TFLOPs   748 W  1563 MHz
+fp8  gemm   2048x 4096x 4096:     79.1 us   869.0 TFLOPs   718 W  1449 MHz
+bf16 gemm   8192x 8192x 8192:   1687.6 us   651.5 TFLOPs   718 W  1270 MHz
+bf16 gemm   4096x 4096x 4096:    227.4 us   604.5 TFLOPs   727 W  1311 MHz
+bf16 gemm  16384x 4096x 4096:    862.6 us   637.3 TFLOPs   744 W  1316 MHz
+bf16 gemm  16384x 4096x 2048:    481.2 us   571.2 TFLOPs   736 W  1376 MHz
+bf16 gemm    512x 4096x 4096:     42.7 us   402.5 TFLOPs   716 W  1550 MHz
+bf16 gemm   2048x 4096x 4096:    133.4 us   515.0 TFLOPs   728 W  1274 MHz

@@ -4,7 +4,8 @@
 
 - A8W4 gemm1、gemm2 单独抽出的 kernel 和测试；
 - 2-kernel 端到端流程，以及单 kernel 融合 MoE；
-- TP8 下 gemm2 + all-reduce 的卡间通讯实验，包括跨卡 atomic、跨卡 store/load 带宽，以及自研 two-shot all-reduce。
+- TP8 下 gemm2 + all-reduce 的卡间通讯实验，包括跨卡 atomic、跨卡 store/load 带宽，以及自研 two-shot all-reduce；
+- EP8（专家并行，每卡 32 个专家、inter 2048）专用的 a8w4 / a16w4 kernel（第 8 节）。
 
 这些改动有实测收益，但依赖测试文件里的私有 kernel、HIP IPC 和特定 shape，难以直接 upstream，所以集中存档在这里。
 
@@ -23,6 +24,11 @@ doc-mimo/
     test_a8w4_fmoe.py                   # gemm1+gemm2 单 kernel 融合 MoE（对比 2-kernel 与 fused_moe）
     test_flydsl_moe_a16wfp4.py          # 加了 a8w4 2-kernel e2e 对比的 e2e 测试（完整文件）
     test_flydsl_moe_a16wfp4.e2e.patch   # 同上，相对基线的 diff
+    ep8_common.py                       # EP8：shape、权重/路由生成、参考实现、下限、冷 cache 计时
+    ep8_prep.py                         # EP8：本地专家排序 + x 量化 + GEMM tile 调度（1 次 launch）
+    ep8_moe.py                          # EP8：gemm1 / gemm2（a8w4、a16w4）、配置表、ep8_moe 入口
+    test_ep8_prep.py / test_ep8_moe.py  # EP8：prep 与 moe_sorting / 调度参考实现对比；gemm1 / gemm2 正确性
+    ep8_small.py / test_ep8_small.py    # EP8：小 batch 单 kernel 融合实验（正确，但没有比 3-launch 快）
   comm/                                 # 卡间通讯实验（torchrun --nproc_per_node=8）
     peer_atomic_probe.py                # 跨卡 bf16x2 atomic：正确性 + 带宽
     peer_store_probe.py                 # 跨卡普通 store（push）/ load（pull）带宽
@@ -46,6 +52,11 @@ python doc-mimo/kernels/test_a8w4_gemm2.py -t 128 512 2048 --tile 64,128,1 32,12
 python doc-mimo/kernels/test_a8w4_fmoe.py -t 128 512
 AITER_CONFIG_FMOE=$PWD/mimo_v2.6_flash_a8w4_tuned_fmoe.csv \
   pytest -s doc-mimo/kernels/test_flydsl_moe_a16wfp4.py::test_flydsl_a16wfp4_silu_e2e
+
+# EP8（单卡即一个 rank）
+python doc-mimo/kernels/test_ep8_prep.py -t 1 16 1024 16384
+python doc-mimo/kernels/test_ep8_moe.py g1 -t 16 4096 --adt fp8 bf16 --bm 128 --rowv 32,64,128 --nw 8 --sch 3 --tr 1
+python doc-mimo/experiments/ep8_e2e/bench_e2e.py -t 1 16 256 1024 4096 16384 --adt fp8 bf16 --cfg auto
 
 # 8 卡
 torchrun --nproc_per_node=8 doc-mimo/kernels/twoshot_allreduce.py -t 128 512 2048 -r uniform --tile 32,128,1
@@ -392,6 +403,77 @@ ISA（`fast_decode/isa_dump.sh`）：
 2. **每个假设单独设计实验验证。** 访存布局、CU 数、tail 这三个看似合理的方向都被数据否定了；tile 布局虽然做出来了，但没有收益。
 3. **判断计算还是访存瓶颈，最有用的指标是「每 SIMD 在跑 N 个 wave 时的 VALU 发射占用」和「增加 wave 后单次迭代时间变不变」**。只看指令条数会误判：`moe-new-tp.md` 第 11 节在 TP8 shape 上删掉约 7% VALU 没有收益；这次在 inter_dim 512 的 shape 上发射口已饱和，删掉 39% 就有收益。
 4. **权重是静态的，凡是只依赖权重的计算都可以挪到准备阶段**，包括字节顺序、符号规范化、scale 的相对值和 flush 判断，只要保证结果逐位一致。
+
+---
+
+## 8. EP8（专家并行）：a8w4 / a16w4 专用 kernel
+
+**目标：** EP8 下每卡 32 个本地专家（共 256 个，topk 8）、H 4096、I 2048。小 batch 达到 memory-bound，大 batch 达到 compute-bound，中间的 batch 不慢于两者之和。激活有两种：a8w4（x 量化成 fp8 + 行 scale）和 a16w4（x 直接用 bf16）。权重都是 mxfp4。
+
+代码在 `kernels/ep8_prep.py`、`kernels/ep8_moe.py`，实验在 `experiments/ep8_{roofline,baseline,e2e}/`。
+
+### 8.1 结论
+
+冷 cache，单位 us（`experiments/ep8_e2e/results/e2e_v4.txt`，`ep8_moe(..., cfg=None)` 按 token 数自动选配置）：
+
+| tokens | a8w4 | a16w4 | mem 下限 | 计算下限 a8w4 / a16w4 | a8w4：x mem / x 之和 | a16w4：x mem / x 之和 | TP 调好的 a8w4 kernel |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 43 | 43 | 7.4 | 0.1 / 0.2 | 5.8 / 5.8 | 5.8 / 5.7 | 57 |
+| 16 | 63 | 74 | 40.9 | 0.6 / 1.1 | 1.55 / 1.53 | 1.80 / 1.75 | 149 |
+| 64 | 124 | 145 | 108 | 3.0 / 5.3 | 1.15 / 1.12 | 1.34 / 1.28 | 165 |
+| 256 | 144 | 161 | 120 | 11.4 / 20.0 | 1.20 / 1.10 | 1.34 / 1.15 | 174 |
+| 1024 | 183 | 244 | 123 | 46 / 81 | 1.49 / 1.08 | 1.98 / 1.19 | 247 |
+| 4096 | 426 | 606 | 136 | 195 / 342 | 3.13 / 1.29 | 4.46 / 1.27 | 668 |
+| 16384 | 1306 | 1767 | 187 | 772 / 1353 | 6.98 / 1.36 | 9.44 / 1.15 | 2275 |
+
+- mem 下限 = 活跃专家权重 + 激活读写，按 3.6 TB/s；计算下限 = hipBLASLt 同形状 dense GEMM 的实测吞吐。两者都是 750 W 功耗墙下的实测值（`experiments/ep8_roofline/`）。
+- 比 TP 调好的 2-kernel a8w4 直接跑 EP8 shape 快 1.2–2.4 倍（`experiments/ep8_baseline/`）。交错 A/B 下的数字比这张表低 5–10%（例如 16384 tokens a8w4 1206 us）。
+- **还没达到的目标：**
+  - **≤16 tokens 不是 memory-bound**（1.5–1.8 倍）：prep 约 8–10 us 加 3 次 launch 是固定开销；只有 1–11 个专家活跃时，能同时读 W 的 WG 不够多。1 token 的 W 只够 7.4 us，固定开销占了大头。
+  - **1024–8192 tokens 比 mem + 计算之和慢 8–37%**：tile 数只有 CU 数的 1.7–3 倍，轮次量化明显；a8w4 gemm1 的输出按 (行, 128 列) 量化，NI 不能小于 128，tile 没法再切细。
+  - **16384 tokens a8w4 是计算下限的 1.6–1.7 倍**（a16w4 1.3 倍）：MFMA 利用率约 45–60%，gemm2 的 bf16x2 atomic epilogue 约占 WG 时间的 20–25%。
+
+### 8.2 流程：3 次 launch
+
+1. **`ep_prep`**：本地专家的路由排序（≤256×EPT 个条目时单 WG 只用 LDS；否则多 WG，每 WG 每专家一次全局 atomic 预留区间 + grid barrier），填充行，每个 block 的专家号；a8w4 时把有本地专家的 token 行量化成 fp8 + 行 scale（与 `quantize_rows` 逐位一致）；WG 0 最后写出 GEMM 的 tile 调度。替代 `moe_sorting` + `quantize_rows`，快 1.3–2 倍。
+2. **`ep_gemm1`**：gate|up GEMM + SiLU；a8w4 的输出按 (行, 128 列) 量化成 fp8 + scale，a16w4 输出 bf16；顺带把 gemm2 的输出清零。
+3. **`ep_gemm2`**：down GEMM；a8w4 时 A 的分组 scale 在 K 循环里按相邻组的比值重标定（一个累加器）；乘路由权重后用 bf16x2 atomic 加到 token 行。
+
+### 8.3 kernel 结构要点
+
+- **权重**：mxfp4 预处理成 fd2 形式（第 7 节），fp4 → fp8 用字节查找表；两种激活共用一份权重，a16w4 再经 fp8 → f32 → bf16。
+- **WG = 一个 (m-block, n-block) tile**，NW 个 wave 按列切分（解码出的 W 片段供 R/16 个 MFMA 使用，WG 内不重复解码）。W 从全局直接读进 VGPR（MFMA 操作数布局），提前 PF 个 K-tile；A 经 LDS 双缓冲（XOR swizzle），`ds_read_b128` 一次读两步。`sch=3`：每个 K-tile 最后一步的 MFMA 推迟到下一个 K-tile 的 barrier 之后，填补 barrier 等待。
+- **行数变体（ROWV）**：每个 WG 按本 block 的有效行数选最小的编译变体（32 / 64 / 128 行），避免为填充行做 MFMA。
+- **TR epilogue**（gemm1）：W 作为 MFMA 的 A 操作数，lane 对应行、每 lane 4 个连续列，SiLU 和 fp8 量化都在寄存器里完成。
+- **`_opaque_tx`**：每个 tile body 前把 `tx` 经一条带副作用的 `v_mov` 复制一份，LLVM 就不会把按 lane 算的地址提到 kernel 开头长期占用寄存器。所有配置都没有 spill（之前 a16w4 有 15–22 个，加循环后有 73–83 个）。
+- **tile 调度**（`sched`，m64 / l128 用）：prep 把 m-block 按专家顺序、按估计代价（max(64, 行数变体)）切成 8 段连续区间，每个 XCD 一段（热点专家会跨 XCD），段内重块在前；GEMM 的 WG bx 处理第 bx % 8 段的第 bx // 8 个 tile，由硬件按 WG 顺序动态派发，相当于每个 XCD 内做 LPT。
+- **配置**（`CFGS`，`AUTO`）：≤8 tokens `t16`（窄 n-tile），≤480 `s16`，≤960 `s32`，≤2176 `m64`，其余 `l128`。
+
+### 8.4 本轮的优化过程（细节见 `experiments/ep8_e2e/README.md`）
+
+| 步骤 | 发现 / 做法 | 效果 |
+|---|---|---|
+| ATT + per-tile 时间线 | 4096 tokens 时 R128 tile 约 90 us、R32 约 43 us；WG 完成时间 p10 137 / max 243 us，XCD 之间差 20%；每 tile 一个 WG 时死 WG 只有约 1 us | 确认问题是负载不均，而不是死 WG |
+| per-XCD atomic 工作队列（persistent） | 负载完全均衡，但重 tile 同时跑时功耗更高、单 tile 变慢；小 batch 多了冷 cache 依赖读取 | 4096 快 6–15%，≤1024 慢 12–18%，放弃 |
+| 加循环后 spill 暴增 → `_opaque_tx` | LLVM 把按 lane 算的地址提到循环外 | 所有配置 0 spill；a16w4 16384 tokens 1850 → ~1720 us |
+| prep 排序 + 硬件派发 | 先按专家整块蛇形分 XCD（热点路由慢 2 倍），再改为按代价切连续区间 | 4096 tokens −9% / −14%，热点路由不退化 |
+| t16 配置 + 按 token 数选配置 | ≤8 tokens 用窄 n-tile | a16w4 −20–26% |
+
+### 8.5 经验与坑
+
+- **先测 per-tile 时间线再优化调度。** `EP8_TL=1` 时 kernel 记录每个 tile 的 `s_memrealtime`、`HW_ID`、`XCC_ID`；`bx % 8 == XCC_ID` 实测成立。
+- **负载均衡不一定变快：** 功耗墙下，把重 tile 集中到一起跑会降低时钟，均衡省下的时间被抵消一部分。
+- **改变循环结构后一定要看 VGPR / spill**（`FLYDSL_DUMP_IR=1 FLYDSL_DEBUG_DUMP_ASM=1`）。
+- **运行时 `while` 里不要写 lane 级发散的 `if`**（例如 `if tx == 0` 取 ticket）：LLVM 会让整个循环体在部分 exec mask 下执行，结果错误或 hang。改成 wave 级分支加按 lane 选择的增量。
+- **LDS 超过 64 KB 是 launch 时报 `hipErrorIllegalState`**，不是编译错误。
+- **FlyDSL 磁盘 cache 的 key** 只包含源文件 hash 和闭包里的标量；trace 时在 helper 里读到的运行时值（如调试 buffer 地址）不在 key 里，要放进 kernel 的闭包标量。
+- **代价模型要与实际 tile 时间一致：** 小 tile 受 W 读取限制，R32 与 R64 一样慢；按「固定开销 + 行数」估计会切出不均的区间。
+
+### 8.6 后续方向
+
+- 小 batch：把 prep 合进 gemm1（gemm1 自己读路由），或与上一层重叠；只有 1–8 个专家活跃时用 split-K，让更多 CU 读 W。
+- 中等 batch：a8w4 gemm1 的量化组跨 WG（NI=64 时相邻 WG 交换行 amax），把 tile 切细，减少轮次量化。
+- 大 batch：gemm2 的 atomic epilogue 与下一个 tile 的主循环重叠；提高 gemm1 的 MFMA 利用率。
 
 ---
 

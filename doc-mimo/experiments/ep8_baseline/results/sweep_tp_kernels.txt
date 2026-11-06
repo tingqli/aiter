@@ -1,0 +1,40 @@
+tokens     16: rows     13 act 11 max     2 | mem    40.9 fp8     0.6 bf16     1.1 us
+   bm 16 gemm1 best tn64 bcm2 bf16      37.1 us  2.64 TB/s     12 TF | gemm2 best tn64 bcm2     20.8 us  2.36 TB/s     10 TF
+        g1: tn64 bcm2 bf16 37.1  tn128 bcm2 bf16 39.4  tn64 bcm1 bf16 56.0  tn128 bcm1 bf16 62.4
+        g2: tn64 bcm2 20.8  tn128 bcm2 21.5  tn256 bcm2 23.9  tn64 bcm0 29.1  tn256 bcm0 32.2  tn128 bcm0 33.2
+   bm 32 gemm1 best tn64 bcm2 bf16      41.6 us  2.36 TB/s     10 TF | gemm2 best tn256 bcm2    26.7 us  1.84 TB/s      8 TF
+        g1: tn64 bcm2 bf16 41.6  tn128 bcm2 43.0  tn64 bcm1 bf16 54.9  tn128 bcm1 60.4
+        g2: tn256 bcm2 26.7  tn64 bcm2 27.7  tn128 bcm2 33.4  tn256 bcm0 34.7  tn64 bcm0 35.0  tn128 bcm0 39.9
+   bm 64 gemm1 best tn64 bcm2 dyn bf16    42.7 us  2.30 TB/s     10 TF | gemm2 best tn128 bcm2    32.5 us  1.51 TB/s      7 TF
+        g1: tn64 bcm2 dyn bf16 42.7  tn128 bcm2 dyn 42.8  tn64 bcm2 bf16 52.0  tn128 bcm2 55.7  tn64 bcm1 dyn bf16 57.0  tn128 bcm1 dyn 62.1  tn64 bcm1 bf16 62.1  tn128 bcm1 71.4
+        g2: tn128 bcm2 32.5  tn64 bcm2 35.6  tn128 bcm0 38.9  tn256 bcm2 41.3  tn64 bcm0 42.3  tn256 bcm0 45.9
+tokens    256: rows    244 act 32 max    14 | mem   119.9 fp8    11.4 bf16    20.0 us
+   bm 16 gemm1 best tn128 bcm2 bf16     92.1 us  3.10 TB/s     89 TF | gemm2 best tn128 bcm2    48.9 us  2.92 TB/s     84 TF
+        g1: tn128 bcm2 bf16 92.1  tn64 bcm2 bf16 99.3  tn128 bcm1 bf16 138.2  tn64 bcm1 bf16 150.6
+        g2: tn128 bcm2 48.9  tn256 bcm2 50.1  tn64 bcm2 50.4  tn256 bcm0 80.5  tn64 bcm0 80.5  tn128 bcm0 82.3
+   bm 32 gemm1 best tn128 bcm2          96.2 us  2.97 TB/s     85 TF | gemm2 best tn256 bcm2    58.9 us  2.42 TB/s     69 TF
+        g1: tn128 bcm2 96.2  tn64 bcm2 bf16 106.3  tn128 bcm1 140.7  tn64 bcm1 bf16 153.1
+        g2: tn256 bcm2 58.9  tn64 bcm2 61.1  tn128 bcm2 63.3  tn64 bcm0 82.2  tn128 bcm0 89.4  tn256 bcm0 90.5
+   bm 64 gemm1 best tn128 bcm2 dyn      98.8 us  2.89 TB/s     83 TF | gemm2 best tn128 bcm2    62.7 us  2.27 TB/s     65 TF
+        g1: tn128 bcm2 dyn 98.8  tn64 bcm2 dyn bf16 106.1  tn128 bcm2 110.9  tn64 bcm2 bf16 112.0  tn128 bcm1 dyn 142.4  tn128 bcm1 152.1  tn64 bcm1 dyn bf16 153.9  tn64 bcm1 bf16 162.8
+        g2: tn128 bcm2 62.7  tn256 bcm2 80.7  tn64 bcm2 83.4  tn128 bcm0 89.2  tn256 bcm0 106.8  tn64 bcm0 109.9
+tokens   1024: rows    986 act 32 max    48 | mem   123.1 fp8    46.1 bf16    80.9 us
+   bm 16 gemm1 best tn64 bcm2 bf16     167.9 us  1.70 TB/s    197 TF | gemm2 best tn256 bcm2    79.6 us  1.79 TB/s    208 TF
+        g1: tn64 bcm2 bf16 167.9  tn128 bcm2 bf16 173.6  tn64 bcm1 bf16 174.5  tn128 bcm1 bf16 181.9
+        g2: tn256 bcm2 79.6  tn128 bcm2 81.3  tn128 bcm0 90.8  tn256 bcm0 93.7  tn64 bcm2 103.7  tn64 bcm0 108.0
+   bm 32 gemm1 best tn64 bcm2 bf16     121.9 us  2.34 TB/s    271 TF | gemm2 best tn64 bcm2     96.5 us  1.48 TB/s    171 TF
+        g1: tn64 bcm2 bf16 121.9  tn128 bcm2 130.4  tn64 bcm1 bf16 161.1  tn128 bcm1 167.3
+        g2: tn64 bcm2 96.5  tn128 bcm2 112.1  tn64 bcm0 112.3  tn128 bcm0 124.8  tn256 bcm2 137.2  tn256 bcm0 154.4
+   bm 64 gemm1 best tn128 bcm2 dyn     114.8 us  2.48 TB/s    288 TF | gemm2 best tn128 bcm2   112.2 us  1.27 TB/s    147 TF
+        g1: tn128 bcm2 dyn 114.8  tn64 bcm2 dyn bf16 118.1  tn64 bcm2 bf16 121.0  tn128 bcm2 123.7  tn128 bcm1 dyn 155.0  tn128 bcm1 158.2  tn64 bcm1 dyn bf16 162.7  tn64 bcm1 bf16 166.7
+        g2: tn128 bcm2 112.2  tn128 bcm0 117.8  tn64 bcm2 123.5  tn64 bcm0 138.1  tn256 bcm2 191.4  tn256 bcm0 202.6
+tokens   4096: rows   4164 act 32 max   154 | mem   136.0 fp8   194.8 bf16   341.7 us
+   bm 16 gemm1 best tn128 bcm1 bf16    373.8 us  0.76 TB/s    374 TF | gemm2 best tn256 bcm0   190.5 us  0.75 TB/s    367 TF
+        g1: tn128 bcm1 bf16 373.8  tn64 bcm1 bf16 516.3  tn128 bcm2 bf16 635.2  tn64 bcm2 bf16 677.4
+        g2: tn256 bcm0 190.5  tn128 bcm0 219.5  tn256 bcm2 241.1  tn64 bcm0 285.2  tn128 bcm2 288.5  tn64 bcm2 353.1
+   bm 32 gemm1 best tn128 bcm1         274.4 us  1.04 TB/s    509 TF | gemm2 best tn64 bcm0    265.2 us  0.54 TB/s    263 TF
+        g1: tn128 bcm1 274.4  tn64 bcm1 bf16 319.0  tn128 bcm2 365.6  tn64 bcm2 bf16 397.1
+        g2: tn64 bcm0 265.2  tn128 bcm0 297.8  tn64 bcm2 305.0  tn128 bcm2 335.9  tn256 bcm0 362.8  tn256 bcm2 399.5
+   bm 64 gemm1 best tn128 bcm1         244.4 us  1.17 TB/s    572 TF | gemm2 best tn64 bcm0    331.3 us  0.43 TB/s    211 TF
+        g1: tn128 bcm1 244.4  tn128 bcm1 dyn 252.6  tn128 bcm2 253.7  tn128 bcm2 dyn 260.8  tn64 bcm1 bf16 266.8  tn64 bcm1 dyn bf16 272.4  tn64 bcm2 dyn bf16 279.8  tn64 bcm2 bf16 283.4
+        g2: tn64 bcm0 331.3  tn64 bcm2 343.7  tn128 bcm0 404.9  tn128 bcm2 444.7  tn256 bcm2 1151.9  tn256 bcm0 1166.9

@@ -1,0 +1,45 @@
+tokens     16: rows     13 act 11 max     2 | mem    40.9 fp8     0.6 bf16     1.1 us
+   fp8  s16  :     75.7 us | x1.85 mem x124.46 comp x1.82 sum | cos 6.5e-05 | sort    9.5 quant    5.5 g1   35.4 g2   21.3
+   fp8  s32  :     79.6 us | x1.95 mem x130.92 comp x1.92 sum | cos 6.5e-05 | sort   10.0 quant    5.3 g1   37.2 g2   22.1
+   fp8  m64  :     89.2 us | x2.18 mem x146.67 comp x2.15 sum | cos 6.5e-05 | sort   11.3 quant    5.1 g1   42.9 g2   27.3
+   fp8  l128 :     80.1 us | x1.96 mem x131.78 comp x1.93 sum | cos 6.5e-05 | sort   15.5 quant    5.3 g1   35.1 g2   21.2
+   bf16 s16  :     76.3 us | x1.86 mem x71.52 comp x1.82 sum | cos 2.0e-06 | sort    9.4 g1   40.9 g2   23.2
+   bf16 s32  :     86.4 us | x2.11 mem x81.03 comp x2.06 sum | cos 2.0e-06 | sort    9.7 g1   45.3 g2   27.0
+   bf16 m64  : FAIL AssertionError: a K tile holds whole 128-K W chunks
+   bf16 l128 : FAIL AssertionError: a K tile holds whole 128-K W chunks
+tokens    256: rows    244 act 32 max    14 | mem   119.9 fp8    11.4 bf16    20.0 us
+   fp8  s16  :    149.3 us | x1.25 mem x13.08 comp x1.14 sum | cos 6.3e-05 | sort   10.4 quant    6.5 g1   82.5 g2   47.0
+   fp8  s32  :    161.7 us | x1.35 mem x14.16 comp x1.23 sum | cos 6.3e-05 | sort   11.6 quant    7.2 g1   87.9 g2   53.5
+   fp8  m64  :    189.1 us | x1.58 mem x16.57 comp x1.44 sum | cos 6.3e-05 | sort   11.0 quant    6.9 g1  104.5 g2   60.5
+   fp8  l128 :    163.7 us | x1.37 mem x14.34 comp x1.25 sum | cos 6.3e-05 | sort   11.8 quant    7.3 g1   87.9 g2   51.8
+   bf16 s16  :    164.9 us | x1.38 mem x8.24 comp x1.18 sum | cos 2.4e-06 | sort   10.8 g1   95.7 g2   53.1
+   bf16 s32  :    187.0 us | x1.56 mem x9.34 comp x1.34 sum | cos 2.4e-06 | sort   11.3 g1  103.4 g2   61.7
+   bf16 m64  : FAIL AssertionError: a K tile holds whole 128-K W chunks
+   bf16 l128 : FAIL AssertionError: a K tile holds whole 128-K W chunks
+tokens   1024: rows    986 act 32 max    48 | mem   123.1 fp8    46.1 bf16    80.9 us
+   fp8  s16  :    270.4 us | x2.20 mem x5.86 comp x1.60 sum | cos 6.8e-05 | sort   17.8 quant    8.6 g1  160.4 g2   90.6
+   fp8  s32  :    219.9 us | x1.79 mem x4.77 comp x1.30 sum | cos 6.8e-05 | sort   17.3 quant    8.3 g1  124.3 g2   65.2
+   fp8  m64  :    208.1 us | x1.69 mem x4.51 comp x1.23 sum | cos 6.8e-05 | sort   17.7 quant    8.8 g1  111.9 g2   65.5
+   fp8  l128 :    195.2 us | x1.59 mem x4.23 comp x1.15 sum | cos 6.8e-05 | sort   17.5 quant    8.6 g1  104.7 g2   60.8
+   bf16 s16  :    309.1 us | x2.51 mem x3.82 comp x1.52 sum | cos 2.5e-06 | sort   18.3 g1  172.4 g2  100.6
+   bf16 s32  :    261.1 us | x2.12 mem x3.23 comp x1.28 sum | cos 2.5e-06 | sort   17.8 g1  157.7 g2   80.3
+   bf16 m64  : FAIL AssertionError: a K tile holds whole 128-K W chunks
+   bf16 l128 : FAIL AssertionError: a K tile holds whole 128-K W chunks
+tokens   4096: rows   4164 act 32 max   154 | mem   136.0 fp8   194.8 bf16   341.7 us
+   fp8  s16  :    975.4 us | x7.17 mem x5.01 comp x2.95 sum | cos 6.8e-05 | sort   38.0 quant   21.9 g1  577.4 g2  320.6
+   fp8  s32  :    612.4 us | x4.50 mem x3.14 comp x1.85 sum | cos 6.8e-05 | sort   38.1 quant   21.8 g1  354.5 g2  188.0
+   fp8  m64  :    479.8 us | x3.53 mem x2.46 comp x1.45 sum | cos 6.8e-05 | sort   35.8 quant   20.5 g1  257.0 g2  143.2
+   fp8  l128 :    479.4 us | x3.52 mem x2.46 comp x1.45 sum | cos 6.8e-05 | sort   32.3 quant   19.8 g1  261.7 g2  166.8
+   bf16 s16  :    994.0 us | x7.31 mem x2.91 comp x2.08 sum | cos 2.6e-06 | sort   39.8 g1  610.2 g2  344.0
+   bf16 s32  :    695.8 us | x5.12 mem x2.04 comp x1.46 sum | cos 2.6e-06 | sort   39.6 g1  403.9 g2  225.1
+   bf16 m64  : FAIL AssertionError: a K tile holds whole 128-K W chunks
+   bf16 l128 : FAIL AssertionError: a K tile holds whole 128-K W chunks
+tokens  16384: rows  16491 act 32 max   558 | mem   187.2 fp8   771.5 bf16  1353.2 us
+   fp8  s16  :   3540.8 us | x18.91 mem x4.59 comp x3.69 sum | cos 6.7e-05 | sort   85.2 quant   63.8 g1 2426.3 g2  989.4
+   fp8  s32  :   2169.4 us | x11.59 mem x2.81 comp x2.26 sum | cos 6.7e-05 | sort   88.8 quant   66.8 g1 1345.3 g2  673.1
+   fp8  m64  :   1492.0 us | x7.97 mem x1.93 comp x1.56 sum | cos 6.7e-05 | sort   81.3 quant   63.2 g1  851.8 g2  445.1
+   fp8  l128 :   1320.2 us | x7.05 mem x1.71 comp x1.38 sum | cos 6.7e-05 | sort   74.6 quant   61.5 g1  675.0 g2  475.2
+   bf16 s16  :   3900.1 us | x20.83 mem x2.88 comp x2.53 sum | cos 2.6e-06 | sort   89.6 g1 2451.5 g2 1420.9
+   bf16 s32  :   2456.5 us | x13.12 mem x1.82 comp x1.59 sum | cos 2.6e-06 | sort   92.3 g1 1511.9 g2  878.8
+   bf16 m64  : FAIL AssertionError: a K tile holds whole 128-K W chunks
+   bf16 l128 : FAIL AssertionError: a K tile holds whole 128-K W chunks

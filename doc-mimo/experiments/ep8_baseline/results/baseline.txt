@@ -1,0 +1,28 @@
+tokens      1: rows      2 act  2 max     1 | mem     7.4 fp8     0.1 bf16     0.2 us
+   a8w4 2k bm 32:     57.0 us  x7.67 mem x609.31 fp8 x7.57 sum | cos 4.1e-05 | sort 9.3 quant 5.0 gemm1 25.4 gemm2 14.4
+   a8w4 2k bm 64:     58.1 us  x7.81 mem x620.45 fp8 x7.71 sum | cos 4.1e-05 | sort 10.7 quant 4.3 gemm1 25.8 gemm2 12.5
+   a16w4 fused_moe: FAIL ImportError: /sgl-workspace/aiter/aiter/jit/module_moe_cktile2stages.so: undefined symbol: _Z85moe_cktile2stages_gemm1_256x64x256x256_1x4_16x16x32_1perCU_1x32_HasBias_swiglu_SplitKIDF16bN7ck_tile16pk_float4_e2m1_tEfDF16bEN2at6TensorERS3_S4_S4_S4_S4_S4_iSt8optionalIiES6_S5_IS3_ES7_S7_S7_S6_S6_
+tokens     16: rows     13 act 11 max     2 | mem    40.9 fp8     0.6 bf16     1.1 us
+   a8w4 2k bm 32:    154.9 us  x3.79 mem x254.72 fp8 x3.73 sum | cos 6.5e-05 | sort 9.9 quant 5.6 gemm1 39.1 gemm2 27.3
+   a8w4 2k bm 64:    149.0 us  x3.64 mem x244.96 fp8 x3.59 sum | cos 6.5e-05 | sort 11.3 quant 5.1 gemm1 39.3 gemm2 26.8
+   a16w4 fused_moe: FAIL RuntimeError: Unsupported kernel config for moe heuristic dispatch
+tokens     64: rows     65 act 29 max     4 | mem   108.0 fp8     3.0 bf16     5.3 us
+   a8w4 2k bm 32:    183.0 us  x1.70 mem x60.19 fp8 x1.65 sum | cos 6.4e-05 | sort 9.2 quant 5.1 gemm1 82.4 gemm2 56.7
+   a8w4 2k bm 64:    165.1 us  x1.53 mem x54.28 fp8 x1.49 sum | cos 6.4e-05 | sort 9.8 quant 5.6 gemm1 82.3 gemm2 57.0
+   a16w4 fused_moe: FAIL RuntimeError: Unsupported kernel config for moe heuristic dispatch
+tokens    256: rows    244 act 32 max    14 | mem   119.9 fp8    11.4 bf16    20.0 us
+   a8w4 2k bm 32:    174.8 us  x1.46 mem x15.32 fp8 x1.33 sum | cos 6.3e-05 | sort 10.6 quant 5.9 gemm1 93.8 gemm2 59.8
+   a8w4 2k bm 64:    174.1 us  x1.45 mem x15.25 fp8 x1.33 sum | cos 6.3e-05 | sort 11.2 quant 6.6 gemm1 92.9 gemm2 60.6
+   a16w4 fused_moe: FAIL RuntimeError: Unsupported kernel config for moe heuristic dispatch
+tokens   1024: rows    986 act 32 max    48 | mem   123.1 fp8    46.1 bf16    80.9 us
+   a8w4 2k bm 32:    246.6 us  x2.00 mem x5.35 fp8 x1.46 sum | cos 6.8e-05 | sort 15.9 quant 7.6 gemm1 120.6 gemm2 98.4
+   a8w4 2k bm 64:    248.8 us  x2.02 mem x5.39 fp8 x1.47 sum | cos 6.8e-05 | sort 16.7 quant 7.9 gemm1 108.4 gemm2 108.5
+   a16w4 fused_moe: FAIL RuntimeError: Unsupported kernel config for moe heuristic dispatch
+tokens   4096: rows   4164 act 32 max   154 | mem   136.0 fp8   194.8 bf16   341.7 us
+   a8w4 2k bm 32:    668.3 us  x4.91 mem x3.43 fp8 x2.02 sum | cos 6.8e-05 | sort 33.9 quant 19.9 gemm1 262.1 gemm2 348.6
+   a8w4 2k bm 64:    747.5 us  x5.50 mem x3.84 fp8 x2.26 sum | cos 6.8e-05 | sort 33.0 quant 20.1 gemm1 239.7 gemm2 420.2
+   a16w4 fused_moe: FAIL RuntimeError: Unsupported kernel config for moe heuristic dispatch
+tokens  16384: rows  16491 act 32 max   558 | mem   187.2 fp8   771.5 bf16  1353.2 us
+   a8w4 2k bm 32:   2275.0 us  x12.15 mem x2.95 fp8 x2.37 sum | cos 6.7e-05 | sort 70.0 quant 59.7 gemm1 849.6 gemm2 1283.0
+   a8w4 2k bm 64:   2491.0 us  x13.31 mem x3.23 fp8 x2.60 sum | cos 6.7e-05 | sort 70.1 quant 59.5 gemm1 687.4 gemm2 1660.8
+   a16w4 fused_moe: FAIL RuntimeError: Unsupported kernel config for moe heuristic dispatch
