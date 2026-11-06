@@ -414,30 +414,31 @@ ISA（`fast_decode/isa_dump.sh`）：
 
 ### 8.1 结论
 
-冷 cache，单位 us（`experiments/ep8_e2e/results/e2e_v4.txt`，`ep8_moe(..., cfg=None)` 按 token 数自动选配置）：
+冷 cache，单位 us（`experiments/ep8_e2e/results/e2e_v5.txt`，`ep8_moe(..., cfg=None)` 按 token 数自动选配置）：
 
-| tokens | a8w4 | a16w4 | mem 下限 | 计算下限 a8w4 / a16w4 | a8w4：x mem / x 之和 | a16w4：x mem / x 之和 | TP 调好的 a8w4 kernel |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 43 | 43 | 7.4 | 0.1 / 0.2 | 5.8 / 5.8 | 5.8 / 5.7 | 57 |
-| 16 | 63 | 74 | 40.9 | 0.6 / 1.1 | 1.55 / 1.53 | 1.80 / 1.75 | 149 |
-| 64 | 124 | 145 | 108 | 3.0 / 5.3 | 1.15 / 1.12 | 1.34 / 1.28 | 165 |
-| 256 | 144 | 161 | 120 | 11.4 / 20.0 | 1.20 / 1.10 | 1.34 / 1.15 | 174 |
-| 1024 | 183 | 244 | 123 | 46 / 81 | 1.49 / 1.08 | 1.98 / 1.19 | 247 |
-| 4096 | 426 | 606 | 136 | 195 / 342 | 3.13 / 1.29 | 4.46 / 1.27 | 668 |
-| 16384 | 1306 | 1767 | 187 | 772 / 1353 | 6.98 / 1.36 | 9.44 / 1.15 | 2275 |
+| tokens | a8w4 | a8w4 TFLOPS | a16w4 | mem 下限 | 计算下限 a8w4 / a16w4 | a8w4：x mem / x 之和 | a16w4：x mem / x 之和 | TP 调好的 a8w4 kernel |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 42 | 2.4 | 42 | 7.4 | 0.1 / 0.2 | 5.70 / 5.63 | 5.64 / 5.51 | 57 |
+| 16 | 64 | 10 | 73 | 40.9 | 0.6 / 1.1 | 1.57 / 1.54 | 1.79 / 1.74 | 149 |
+| 64 | 126 | 26 | 146 | 108 | 3.0 / 5.3 | 1.17 / 1.13 | 1.35 / 1.29 | 165 |
+| 256 | 145 | 85 | 163 | 120 | 11.4 / 20.0 | 1.21 / 1.10 | 1.36 / 1.16 | 174 |
+| 1024 | 188 | 264 | 240 | 123 | 46 / 81 | 1.53 / 1.11 | 1.95 / 1.18 | 247 |
+| 4096 | 408 | 514 | 603 | 136 | 195 / 342 | 3.00 / 1.23 | 4.43 / 1.26 | 668 |
+| 16384 | 1288 | 645 | 1726 | 187 | 772 / 1353 | 6.88 / 1.34 | 9.22 / 1.12 | 2275 |
 
+- a8w4 TFLOPS 只计有效计算：本卡 (token, 专家) 对的行数 rows × 6 × I × H（gemm1 2·rows·2I·H + gemm2 2·rows·I·H），除以端到端时间（含 prep）。对照：hipBLASLt fp8 dense GEMM 在同形状上为 1117（gemm1）/ 1002（gemm2）TFLOPS。交错 A/B 下 16384 tokens 为 1158 us，即 717 TFLOPS。
 - mem 下限 = 活跃专家权重 + 激活读写，按 3.6 TB/s；计算下限 = hipBLASLt 同形状 dense GEMM 的实测吞吐。两者都是 750 W 功耗墙下的实测值（`experiments/ep8_roofline/`）。
-- 比 TP 调好的 2-kernel a8w4 直接跑 EP8 shape 快 1.2–2.4 倍（`experiments/ep8_baseline/`）。交错 A/B 下的数字比这张表低 5–10%（例如 16384 tokens a8w4 1206 us）。
+- 比 TP 调好的 2-kernel a8w4 直接跑 EP8 shape 快 1.2–2.3 倍（`experiments/ep8_baseline/`）。交错 A/B 下的数字比这张表低 5–10%（例如 16384 tokens a8w4 1158 us）。
 - **还没达到的目标：**
   - **≤16 tokens 不是 memory-bound**（1.5–1.8 倍）：prep 约 8–10 us 加 3 次 launch 是固定开销；只有 1–11 个专家活跃时，能同时读 W 的 WG 不够多。1 token 的 W 只够 7.4 us，固定开销占了大头。
-  - **1024–8192 tokens 比 mem + 计算之和慢 8–37%**：tile 数只有 CU 数的 1.7–3 倍，轮次量化明显；a8w4 gemm1 的输出按 (行, 128 列) 量化，NI 不能小于 128，tile 没法再切细。
-  - **16384 tokens a8w4 是计算下限的 1.6–1.7 倍**（a16w4 1.3 倍）：MFMA 利用率约 45–60%，gemm2 的 bf16x2 atomic epilogue 约占 WG 时间的 20–25%。
+  - **1024–8192 tokens 比 mem + 计算之和慢 11–37%**：tile 数只有 CU 数的 1.7–3 倍，轮次量化明显；a8w4 gemm1 的输出按 (行, 128 列) 量化，NI 不能小于 128，tile 没法再切细。
+  - **16384 tokens a8w4 是计算下限的 1.5–1.7 倍**（a16w4 1.3 倍）：MFMA 利用率约 45–60%；主要差在 gemm2（见 8.6）。
 
 ### 8.2 流程：3 次 launch
 
 1. **`ep_prep`**：本地专家的路由排序（≤256×EPT 个条目时单 WG 只用 LDS；否则多 WG，每 WG 每专家一次全局 atomic 预留区间 + grid barrier），填充行，每个 block 的专家号；a8w4 时把有本地专家的 token 行量化成 fp8 + 行 scale（与 `quantize_rows` 逐位一致）；WG 0 最后写出 GEMM 的 tile 调度。替代 `moe_sorting` + `quantize_rows`，快 1.3–2 倍。
 2. **`ep_gemm1`**：gate|up GEMM + SiLU；a8w4 的输出按 (行, 128 列) 量化成 fp8 + scale，a16w4 输出 bf16；顺带把 gemm2 的输出清零。
-3. **`ep_gemm2`**：down GEMM；a8w4 时 A 的分组 scale 在 K 循环里按相邻组的比值重标定（一个累加器）；乘路由权重后用 bf16x2 atomic 加到 token 行。
+3. **`ep_gemm2`**：down GEMM；a8w4 时 A 的分组 scale 在 K 循环里按相邻组的比值重标定（一个累加器）；乘路由权重后用 bf16x2 atomic 加到 token 行，本卡只有 1 路的 token 直接 store（single_store）。
 
 ### 8.3 kernel 结构要点
 
@@ -447,6 +448,7 @@ ISA（`fast_decode/isa_dump.sh`）：
 - **TR epilogue**（gemm1）：W 作为 MFMA 的 A 操作数，lane 对应行、每 lane 4 个连续列，SiLU 和 fp8 量化都在寄存器里完成。
 - **`_opaque_tx`**：每个 tile body 前把 `tx` 经一条带副作用的 `v_mov` 复制一份，LLVM 就不会把按 lane 算的地址提到 kernel 开头长期占用寄存器。所有配置都没有 spill（之前 a16w4 有 15–22 个，加循环后有 73–83 个）。
 - **tile 调度**（`sched`，m64 / l128 用）：prep 把 m-block 按专家顺序、按估计代价（max(64, 行数变体)）切成 8 段连续区间，每个 XCD 一段（热点专家会跨 XCD），段内重块在前；GEMM 的 WG bx 处理第 bx % 8 段的第 bx // 8 个 tile，由硬件按 WG 顺序动态派发，相当于每个 XCD 内做 LPT。
+- **single_store**（参考 pyhip，见 8.6）：prep 用一次 wave ballot 数出每个 token 的本地路数，写出 `route_counts`，并在只有 1 路的 token 的 sorted id 上置符号位；gemm2 对这些行用普通 store 代替 atomic，gemm1 只清零路数 ≠ 1 的行（路数在 WG 开头读进 SGPR，tile 结束后再写 0，不占 VGPR）。随机路由下约 40% 的路由和 40% 的输出行受益，单路 token 的结果与 atomic 版逐位相同。
 - **配置**（`CFGS`，`AUTO`）：≤8 tokens `t16`（窄 n-tile），≤480 `s16`，≤960 `s32`，≤2176 `m64`，其余 `l128`。
 
 ### 8.4 本轮的优化过程（细节见 `experiments/ep8_e2e/README.md`）
@@ -458,6 +460,7 @@ ISA（`fast_decode/isa_dump.sh`）：
 | 加循环后 spill 暴增 → `_opaque_tx` | LLVM 把按 lane 算的地址提到循环外 | 所有配置 0 spill；a16w4 16384 tokens 1850 → ~1720 us |
 | prep 排序 + 硬件派发 | 先按专家整块蛇形分 XCD（热点路由慢 2 倍），再改为按代价切连续区间 | 4096 tokens −9% / −14%，热点路由不退化 |
 | t16 配置 + 按 token 数选配置 | ≤8 tokens 用窄 n-tile | a16w4 −20–26% |
+| single_store（pyhip） | 单路 token 的行 store、不清零 | gemm2 −4 ~ −6%；端到端 a8w4 4096 / 16384 tokens −1.5% / −2.5%，a16w4 −0.3% / −1.1% |
 
 ### 8.5 经验与坑
 
@@ -469,11 +472,40 @@ ISA（`fast_decode/isa_dump.sh`）：
 - **FlyDSL 磁盘 cache 的 key** 只包含源文件 hash 和闭包里的标量；trace 时在 helper 里读到的运行时值（如调试 buffer 地址）不在 key 里，要放进 kernel 的闭包标量。
 - **代价模型要与实际 tile 时间一致：** 小 tile 受 W 读取限制，R32 与 R64 一样慢；按「固定开销 + 行数」估计会切出不均的区间。
 
-### 8.6 后续方向
+### 8.6 与 pyhip a8w8 blockscale MoE 的对照
+
+[pyhip `moe_a8w8_blockscale_gfx942.md`](https://github.com/tingqli/pyhip/blob/luwei/942-fp8-blockwise/docs/moe_a8w8_blockscale_gfx942.md) 是同一个 MiMo-V2.6-Flash EP8 shape 的 FlyDSL 两段式 MoE，但权重是 FP8（128×128 block scale），不需要 fp4 解码。它第 3 节列的优化逐条对照：
+
+| pyhip 的优化 | 在本实现中 |
+|---|---|
+| A2 按排序后的行连续读（sorted_a2） | 已有：gemm1 按 sorted 行写 A2，gemm2 连续读 |
+| GateUp epilogue 里做 SiLU·up 的 (行, 128) FP8 量化 | 已有（a8w4 的 gemm1） |
+| Down 先经 LDS 转置，一条 atomic 写 2 行 × 128 B | 已有（gemm2 epilogue 经 LDS 暂存，32 lane × bf16x2 一行） |
+| BF16 输出 round-to-nearest-even | 已有 |
+| single_store（单路 token 直接 store + 只清零路数 ≠ 1 的行） | **本轮实现**：gemm2 −4 ~ −6%（pyhip 在真实 EP8 路由下 Down −6%），端到端 a8w4 −1.5 ~ −2.5% |
+| pair_blocks（GateUp 任务顺序） | 类似的是 prep 的 tile 调度（同专家的块在同一 XCD、重块在前） |
+| 没采用：常驻 GateUp、清零放另一个 stream | 一致：我们的 persistent / atomic 工作队列也没有收益（750 W 功耗墙） |
+| GateUp / Down 用 BM256×BN256、8 wave 2x4 / 4x2 布局、A 和 W 都过 LDS，mainloop MFMA 效率约 93% | **未做**，见下 |
+
+按每个 kernel 的有效 TFLOPS（16K tokens，pyhip 是 `ep_uniform` 路由，每个 token 恰好 1 路）：
+
+| | pyhip（FP8 W） | 本实现 a8w4（fp4 W） |
+|---|---:|---:|
+| gemm1 / GateUp | 878（626 us） | 770–815（680–719 us） |
+| gemm2 / Down | 705（atomic，390 us）/ 833（全 store，330 us） | 550–608（455–503 us） |
+
+- gemm1 只差 7–12%：gemm2 差 15–25%，是大 batch 下主要的差距。
+- pyhip 的 Down 靠 256×256 的大 tile 把 prolog / epilog（K 只有 2048）摊薄，并把 A、W 都放进 LDS。搬到 fp4 W 上有三个障碍：
+  - W 要先解码：多个 wave 共用一个 W tile（二维 wave 布局）时，要么各自重复解码，要么先解码成 fp8 写进 LDS；
+  - LDS：BM=256 时 A 的双缓冲（K-tile 128）就要 64 KB，还放不下 a8w4 的分组 scale 比值表；
+  - VGPR：256 行的累加器要翻倍（128 个），再加上 W 预取和解码临时寄存器，超过每 CU 跑 8 wave 时的 256。
+  所以这一项需要重写 gemm2，而不是调参；若能达到 pyhip Down 的水平（16K 下 705 TF），16384 tokens 的 gemm2 约可从 ~460 降到 ~390 us，端到端再快约 6%。
+
+### 8.7 后续方向
 
 - 小 batch：把 prep 合进 gemm1（gemm1 自己读路由），或与上一层重叠；只有 1–8 个专家活跃时用 split-K，让更多 CU 读 W。
 - 中等 batch：a8w4 gemm1 的量化组跨 WG（NI=64 时相邻 WG 交换行 amax），把 tile 切细，减少轮次量化。
-- 大 batch：gemm2 的 atomic epilogue 与下一个 tile 的主循环重叠；提高 gemm1 的 MFMA 利用率。
+- 大 batch：按 8.6 重写 gemm2（更大的 M tile，解码后的 W 经 LDS 在 wave 间共用）；提高 gemm1 的 MFMA 利用率。
 
 ---
 

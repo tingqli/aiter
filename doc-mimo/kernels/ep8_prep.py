@@ -33,7 +33,7 @@ import sys
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import arith, llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -55,6 +55,8 @@ NT = 256
 # GEMM tile schedule (i32, right after the cap // BM block expert ids): [0, 9): XCD
 # bucket starts (m-block slots); [SCHED_BORDER, + nblk): the m-block order.
 SCHED_BORDER = 16
+# sorted id flag: the token has exactly one local route (see _scatter)
+SID_SINGLE = -(1 << 31)
 NUM_CU = 304
 
 
@@ -179,18 +181,36 @@ def compile_ep_prep(*, H, TOPK, EL, BM, EPT, QUANT, MULTI):
             xs[t] = s
 
     # ---- sort helpers ------------------------------------------------------------
-    def _count(lds_i32, arg_ids, arg_w, first, n_ent, i32_e0, tx):
+    assert 64 % TOPK == 0
+
+    @flyc.jit
+    def _rc_store(rc, t, n, ok):
+        if ok:
+            rc[t] = n
+
+    def _count(lds_i32, arg_ids, arg_w, rc, first, n_ent, i32_e0, tx):
+        """entries first + j*NT + tx: (local expert or EL, slot in its expert, weight,
+        entry, the token has exactly one local route). A token's TOPK entries sit in
+        TOPK neighbouring lanes (first, NT multiples of TOPK): one ballot counts its
+        local routes; the group's first lane writes the count to rc[token]."""
         ids = global_typed_ptr(arg_ids, T.i32)
         wts = global_typed_ptr(arg_w, T.f32)
+        lane = tx % fx.Int32(64)
+        g0 = fx.Int64(lane - lane % fx.Int32(TOPK))
         ent = []
         for j in range_constexpr(EPT):
             idx = first + fx.Int32(j * NT) + tx
             ok = idx < n_ent
             idc = ok.select(idx, fx.Int32(0))
             e = fx.Int32(ids[idc]) - i32_e0
-            es = (ok & (e >= fx.Int32(0)) & (e < fx.Int32(EL))).select(e, fx.Int32(EL))
+            loc = ok & (e >= fx.Int32(0)) & (e < fx.Int32(EL))
+            es = loc.select(e, fx.Int32(EL))
+            bal = fx.Int64(rocdl.ballot(T.i64, _raw(loc)))
+            n_loc = fx.Int32(fx.math.ctpop(arith.trunci(
+                T.i32, _raw((bal >> g0) & fx.Int64((1 << TOPK) - 1)))))
+            _rc_store(rc, idc // fx.Int32(TOPK), n_loc, ok & (lane % fx.Int32(TOPK) == fx.Int32(0)))
             ent.append((es, _latomic_add(lds_i32, fx.Int32(L_CNT) + es, 1),
-                        fx.Float32(wts[idc]), idc))
+                        fx.Float32(wts[idc]), idc, n_loc == fx.Int32(1)))
         return ent
 
     @flyc.jit
@@ -306,10 +326,14 @@ def compile_ep_prep(*, H, TOPK, EL, BM, EPT, QUANT, MULTI):
         return light.select(lo + nheavy + nl_before, b - nl_before)
 
     @flyc.jit
-    def _scatter(lds, sids, sw, e, pos, w, idx):
+    def _scatter(lds, sids, sw, e, pos, w, idx, single):
+        """sorted id = token | slot << 24 | (token has exactly one local route) << 31
+        (the GEMMs mask the token with 0xFFFFFF; gemm2 may store such rows instead of
+        adding them atomically)."""
         if e < fx.Int32(EL):
             dst = lds[fx.Int32(L_OFF) + e] + lds[fx.Int32(L_BASE) + e] + pos
-            sids[dst] = (idx // fx.Int32(TOPK)) | ((idx % fx.Int32(TOPK)) << fx.Int32(24))
+            sids[dst] = ((idx // fx.Int32(TOPK)) | ((idx % fx.Int32(TOPK)) << fx.Int32(24))
+                         | single.select(fx.Int32(SID_SINGLE), fx.Int32(0)))
             sw[dst] = w
 
     TPE = NT // EL  # threads per expert for padding rows / block ids
@@ -345,11 +369,18 @@ def compile_ep_prep(*, H, TOPK, EL, BM, EPT, QUANT, MULTI):
                 sched[fx.Int32(SCHED_BORDER) + _slot(lds, e, b0 + b, lt & (b == nfull))] = b0 + b
         _bst_store(lds, sched, tx)
 
+    def _rc_ptr(arg_seids, i32_m):
+        """per-token local route count, after the block expert ids and the schedule."""
+        nblk = (i32_m * fx.Int32(TOPK)) // fx.Int32(BM) + fx.Int32(EL)
+        return global_typed_ptr(fx.Int64(arg_seids) + fx.Int64(fx.Int32(2) * nblk
+                                                               + fx.Int32(SCHED_BORDER)) * fx.Int64(4),
+                                T.i32)
+
     def _finish_sort(lds_i32, lds, arg_sids, arg_sw, arg_seids, arg_nv, ent, i32_m, me, tx):
         sids = global_typed_ptr(arg_sids, T.i32)
         sw = global_typed_ptr(arg_sw, T.f32)
-        for es, pos, w, idc in ent:
-            _scatter(lds, sids, sw, es, pos, w, idc)
+        for es, pos, w, idc, single in ent:
+            _scatter(lds, sids, sw, es, pos, w, idc, single)
         _pad_and_nv(lds_i32, lds, sids, sw, arg_seids, arg_nv, i32_m, me, tx)
 
     @flyc.jit
@@ -371,7 +402,8 @@ def compile_ep_prep(*, H, TOPK, EL, BM, EPT, QUANT, MULTI):
     def _single_sort(lds_i32, lds, arg_ids, arg_w, arg_sids, arg_sw, arg_seids, arg_nv,
                      i32_m, i32_e0, tx):
         """whole sort in one WG, LDS only (M * TOPK <= 256 * EPT)."""
-        ent = _count(lds_i32, arg_ids, arg_w, fx.Int32(0), i32_m * fx.Int32(TOPK), i32_e0, tx)
+        ent = _count(lds_i32, arg_ids, arg_w, _rc_ptr(arg_seids, i32_m), fx.Int32(0),
+                     i32_m * fx.Int32(TOPK), i32_e0, tx)
         gpu.barrier()
         _copy_counts(lds, tx)
         gpu.barrier()
@@ -451,8 +483,8 @@ def compile_ep_prep(*, H, TOPK, EL, BM, EPT, QUANT, MULTI):
             _single_sort(lds_i32, lds, arg_ids, arg_w, arg_sids, arg_sw, arg_seids,
                          arg_nv, i32_m, i32_e0, tx)
         else:
-            ent = _count(lds_i32, arg_ids, arg_w, bx * fx.Int32(EPT * NT),
-                         i32_m * fx.Int32(TOPK), i32_e0, tx)
+            ent = _count(lds_i32, arg_ids, arg_w, _rc_ptr(arg_seids, i32_m),
+                         bx * fx.Int32(EPT * NT), i32_m * fx.Int32(TOPK), i32_e0, tx)
             gpu.barrier()
             _reserve(lds, arg_ws, tx)
             rocdl.s_waitcnt(vmcnt=0)
@@ -497,10 +529,11 @@ def _workspace(device, n):
 
 def ep_prep(topk_ids, topk_weights, x, *, e0, block_m, quant, num_local=32):
     """-> (sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, x8, xs,
-    sched); ``x8``/``xs`` are None unless ``quant`` (x bf16 [M, H] -> fp8 + f32 row
-    scale). ``sched``: the GEMMs' tile schedule (see SCHED_BORDER): XCD bucket
-    starts and the m-block order (``sched[SCHED_BORDER:]``, first
-    num_valid_ids[0] // block_m valid)."""
+    sched, route_counts); ``x8``/``xs`` are None unless ``quant`` (x bf16 [M, H] ->
+    fp8 + f32 row scale). ``sched``: the GEMMs' tile schedule (see SCHED_BORDER):
+    XCD bucket starts and the m-block order (``sched[SCHED_BORDER:]``, first
+    num_valid_ids[0] // block_m valid). ``route_counts``: int32 [M], local routes per
+    token. Sorted ids carry SID_SINGLE for tokens with exactly one local route."""
     M, K = topk_ids.shape
     H = x.shape[1]
     dev = topk_ids.device
@@ -509,8 +542,9 @@ def ep_prep(topk_ids, topk_weights, x, *, e0, block_m, quant, num_local=32):
     sw = torch.empty(cap, dtype=torch.float32, device=dev)
     nblk = cap // block_m
     assert nblk == (M * K) // block_m + num_local and M < 65536
-    seids_sched = torch.empty(2 * nblk + SCHED_BORDER, dtype=torch.int32, device=dev)
-    seids, sched = seids_sched[:nblk], seids_sched[nblk:]
+    seids_sched = torch.empty(2 * nblk + SCHED_BORDER + M, dtype=torch.int32, device=dev)
+    seids, sched = seids_sched[:nblk], seids_sched[nblk:2 * nblk + SCHED_BORDER]
+    rc = seids_sched[2 * nblk + SCHED_BORDER:]
     nv = torch.empty(2, dtype=torch.int32, device=dev)
     x8 = xs = None
     if quant:
@@ -534,4 +568,4 @@ def ep_prep(topk_ids, topk_weights, x, *, e0, block_m, quant, num_local=32):
         x8.data_ptr() if quant else 0, xs.data_ptr() if quant else 0, sids.data_ptr(),
         sw.data_ptr(), seids.data_ptr(), nv.data_ptr(), ws.data_ptr(), int(M), int(e0),
         int(grid), torch.cuda.current_stream())
-    return sids, sw, seids, nv, x8, xs, sched
+    return sids, sw, seids, nv, x8, xs, sched, rc

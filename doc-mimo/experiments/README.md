@@ -93,8 +93,8 @@
 | 实验 | 结论 |
 |---|---|
 | [ep8_roofline](ep8_roofline/) | 750 W 功耗墙下的实测上限：HBM 纯读 3.6 TB/s；hipBLASLt fp8 1117 / 1002 TF（gemm1 / gemm2 形状），bf16 637 / 571 TF；时钟只有 1.2–1.4 GHz |
-| [ep8_baseline](ep8_baseline/) | TP 调好的 a8w4 2-kernel 直接跑 EP8 shape：16 tokens 149 us、4096 tokens 668 us、16384 tokens 2275 us；EP8 专用 kernel 快 1.2–2.4 倍 |
-| [ep8_e2e](ep8_e2e/) | EP8 专用 3-launch（prep → gemm1 → gemm2）：a8w4 / a16w4 在 16 tokens 63 / 74 us（1.5 / 1.8 倍 mem 下限），1024 tokens 183 / 244 us（1.08 / 1.19 倍 mem + 计算），16384 tokens 1306 / 1767 us（1.7 / 1.3 倍计算下限）。本轮：`_opaque_tx` 消除全部 spill；prep 生成按代价切段 + 重块优先的 tile 调度（4096 tokens −9% / −14%，热点路由不退化）；≤8 tokens 的窄 tile 配置（a16w4 −20–26%）；按 token 数自动选配置。per-XCD atomic 工作队列、persistent、专家整块分 XCD 等方案都试过并放弃 |
+| [ep8_baseline](ep8_baseline/) | TP 调好的 a8w4 2-kernel 直接跑 EP8 shape：16 tokens 149 us、4096 tokens 668 us、16384 tokens 2275 us；EP8 专用 kernel 快 1.2–2.3 倍 |
+| [ep8_e2e](ep8_e2e/) | EP8 专用 3-launch（prep → gemm1 → gemm2）：a8w4 / a16w4 在 16 tokens 64 / 73 us（1.6 / 1.8 倍 mem 下限），1024 tokens 188 / 240 us（1.11 / 1.18 倍 mem + 计算），16384 tokens 1288 / 1726 us（1.7 / 1.3 倍计算下限）。本轮：`_opaque_tx` 消除全部 spill；prep 生成按代价切段 + 重块优先的 tile 调度（4096 tokens −9% / −14%，热点路由不退化）；≤8 tokens 的窄 tile 配置（a16w4 −20–26%）；按 token 数自动选配置；参考 pyhip 的 single_store（单路 token 直接 store、只清零其余行：gemm2 −4 ~ −6%）。per-XCD atomic 工作队列、persistent、专家整块分 XCD 等方案都试过并放弃 |
 
 ## 工具与记录
 

@@ -60,10 +60,21 @@ def check(tokens, bm, routing="uniform"):
     x, tw, ti = C.make_routing(tokens, routing=routing)
     mask = C.expert_mask()
     s0, w0, e0, n0, _ = C.ep_sort(ti, tw, bm, mask)
-    s1, w1, e1, n1, x8, xs, bo = PR.ep_prep(ti, tw, x, e0=C.RANK * C.E_LOCAL, block_m=bm,
-                                            quant=True)
+    s1, w1, e1, n1, x8, xs, bo, rc = PR.ep_prep(ti, tw, x, e0=C.RANK * C.E_LOCAL, block_m=bm,
+                                                quant=True)
     torch.cuda.synchronize()
-    ok = int(n0[0]) == int(n1[0]) and int(n1[1]) == tokens
+    # route counts and the single-route flag, then drop the flag for the comparisons
+    rc_ref = (C.local_ids(ti) >= 0).sum(dim=1).int()
+    ok_rc = torch.equal(rc, rc_ref)
+    nvalid = int(n1[0])
+    tok1 = (s1[:nvalid] & 0xFFFFFF).long()
+    real = tok1 < tokens
+    flag = s1[:nvalid] < 0
+    ok_rc &= torch.equal(flag[real], rc_ref[tok1[real]] == 1) and not bool(flag[~real].any())
+    if not ok_rc:
+        print("route count / single flag mismatch")
+    s1 = s1 & 0x7FFFFFFF
+    ok = ok_rc and int(n0[0]) == int(n1[0]) and int(n1[1]) == tokens
     nb = int(n1[0]) // bm
     ok &= torch.equal(e0[:nb], e1[:nb])
     ok_bo = check_sched(bo, e1, s1, nb, bm, tokens)

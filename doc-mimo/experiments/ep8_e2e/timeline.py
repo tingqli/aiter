@@ -78,7 +78,7 @@ def main():
     W = C.make_weights()
     P = EP.prepare_weights(W["w1"], W["w2"], W["w1_scale"], W["w2_scale"])
     x, tw, ti = C.make_routing(args.t)
-    sids, sw, seids, nv, x8, xs, sched = ep8_prep.ep_prep(
+    sids, sw, seids, nv, x8, xs, sched, rc = ep8_prep.ep_prep(
         ti, tw, x, e0=C.RANK * C.E_LOCAL, block_m=bm, quant=fp8)
     if not fp8:
         x8, xs = x, None

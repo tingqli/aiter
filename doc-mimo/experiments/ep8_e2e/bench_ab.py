@@ -47,7 +47,7 @@ def main():
     bm = base["bm"]
     import ep8_prep
     fp8 = args.adt == "fp8"
-    sids, sw, seids, nv, x8, xs, sched = ep8_prep.ep_prep(
+    sids, sw, seids, nv, x8, xs, sched, rc = ep8_prep.ep_prep(
         ti, tw, x, e0=C.RANK * C.E_LOCAL, block_m=bm, quant=fp8)
     ss = seids.numel() * bm
     if not fp8:

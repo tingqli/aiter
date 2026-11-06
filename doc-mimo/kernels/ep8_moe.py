@@ -201,6 +201,44 @@ def _zero_slice(arg_zero, i32_n16, bx, grid, tx, NT):
             buffer_ops.buffer_store(z, rs, off * fx.Int32(4))
 
 
+def _zero_rc_pre(arg_rc, i32_n16, i32_m, ROW16, bx, grid):
+    """route-count-aware zeroing, part 1 (kernel start): this WG's share of the
+    ``i32_n16`` 16 B units of out [M, ROW16 * 16 B] spans <= 2 rows (host asserts
+    share <= ROW16); their local route counts are loaded now into SGPRs (nothing
+    per lane stays live across the tile) and consumed after the tile."""
+    rc = global_typed_ptr(arg_rc, T.i32)
+    per = (i32_n16 + grid - fx.Int32(1)) // grid
+    r0 = fx.min(bx * per // fx.Int32(ROW16), i32_m - fx.Int32(1))
+    r1 = fx.min(r0 + fx.Int32(1), i32_m - fx.Int32(1))
+    return (per, r0, fx.Int32(rocdl.readfirstlane(T.i32, _raw(fx.Int32(rc[r0])))),
+            fx.Int32(rocdl.readfirstlane(T.i32, _raw(fx.Int32(rc[r1])))))
+
+
+def _zero_rc_post(arg_zero, i32_n16, ROW16, UPT, pre, bx, tx, NT):
+    """part 2 (after the tile): zero the units whose row has != 1 local route (a
+    single-route row is stored whole by gemm2)."""
+    per, r0, rc0, rc1 = pre
+    rs = buffer_ops.create_buffer_resource_from_addr(
+        _raw(fx.Int64(arg_zero)), num_records_bytes=_raw(fx.Int64(i32_n16) * fx.Int64(16)))
+    z = Vec.filled(4, 0, fx.Int32)
+    for k in range_constexpr(UPT):
+        u = fx.Int32(k * NT) + tx
+        off = (u < per).select(bx * per + u, i32_n16)  # past the end: dropped
+        rcv = (off // fx.Int32(ROW16) == r0).select(rc0, rc1)
+        buffer_ops.buffer_store(z, rs, (rcv != fx.Int32(1)).select(off, i32_n16) * fx.Int32(4))
+
+
+@flyc.jit
+def _st_or_add_bf16x2(arg_out, idx, pk, single):
+    """out[idx .. idx+1] (bf16): plain store for a single-route row, else atomic add."""
+    ptr = _gep1(_global_base_ptr1(arg_out), idx * fx.Int32(2))
+    if single:
+        llvm.StoreOp(_raw(pk), ptr, alignment=4)
+    else:
+        llvm.AtomicRMWOp(llvm.AtomicBinOp.fadd, ptr, _raw(pk), llvm.AtomicOrdering.monotonic,
+                         syncscope="agent", alignment=4)
+
+
 def _xcd_tile(bx, bound):
     """Bijective XCD round-robin: XCD x (= bx % 8) owns a contiguous range of tiles."""
     xq = _udiv(bound, 8)
@@ -701,7 +739,7 @@ def _make_core(*, FP8, K, W_ROWS, BM, PF, bcm, cols, lds_ptr, LDS_BYTES, lane, t
 
 @functools.cache
 def compile_ep_gemm1(*, H, I, NE, ADT, BM, NI, ROWV, PF=2, bcm=2, wpe=None, NW=4, ARB=256,
-                     acm=2, SCH=1, ST=None, PRIO=0, TR=False, ORDER=False):
+                     acm=2, SCH=1, ST=None, PRIO=0, TR=False, ORDER=False, ZRC=False):
     """Stage 1: ``h = SiLU(A W1g^T) * (A W1u^T)`` for the sorted rows of one expert
     block, NI inter columns per WG.
 
@@ -732,8 +770,12 @@ def compile_ep_gemm1(*, H, I, NE, ADT, BM, NI, ROWV, PF=2, bcm=2, wpe=None, NW=4
         f"_pf{PF}_bcm{bcm}_nw{NW}_a{ARB}" + (f"_w{wpe}" if wpe else "")
         + (f"_acm{acm}" if acm != 2 else "") + (f"_s{SCH}" if SCH != 1 else "")
         + (f"_st{ST}" if ST is not None else "") + (f"_p{PRIO}" if PRIO else "")
-        + ("_tr" if TR else "") + ("_o" if ORDER else "") + ("_tl" if TL else "")
+        + ("_tr" if TR else "") + ("_o" if ORDER else "") + ("_zrc" if ZRC else "")
+        + ("_tl" if TL else "")
     )
+    # route-count-aware zeroing of gemm2's out [M, H] bf16: <= ZRC_UPT units / thread
+    ZRC_ROW16 = H * 2 // 16
+    ZRC_UPT = -(-ZRC_ROW16 // NT)
     TLP = tl_buffer().data_ptr() if TL else 0  # closure scalar -> in the cache key
 
     def _body(lds_ptr, arg_x, arg_xs, arg_w, arg_ws, arg_wexp, arg_eids, arg_sids,
@@ -970,14 +1012,17 @@ def compile_ep_gemm1(*, H, I, NE, ADT, BM, NI, ROWV, PF=2, bcm=2, wpe=None, NW=4
 
     @flyc.jit
     def _entry(arg_x, arg_xs, arg_w, arg_ws, arg_wexp, arg_eids, arg_cumsum, arg_sids,
-               arg_out, arg_outs, i32_m, arg_zero, i32_zero16, arg_sched):
+               arg_out, arg_outs, i32_m, arg_zero, i32_zero16, arg_sched, arg_rc):
         lds_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         tx = fx.Int32(gpu.thread_id("x"))
         bx = fx.Int32(gpu.block_id("x"))
         lane = tx % fx.Int32(64)
         wave = fx.Int32(rocdl.readfirstlane(T.i32, _raw(tx // fx.Int32(64))))
         grid = fx.Int32(gpu.grid_dim.x)
-        _zero_slice(arg_zero, i32_zero16, bx, grid, tx, NT)
+        if const_expr(ZRC):
+            zpre = _zero_rc_pre(arg_rc, i32_zero16, i32_m, ZRC_ROW16, bx, grid)
+        else:
+            _zero_slice(arg_zero, i32_zero16, bx, grid, tx, NT)
         bound = _global_i32_at(arg_cumsum, fx.Int32(0)) // fx.Int32(BM) * fx.Int32(NB)
         if const_expr(ORDER):
             lo, hi, nwg = _bucket_bounds(arg_sched, bx, grid, NB)
@@ -1005,24 +1050,26 @@ def compile_ep_gemm1(*, H, I, NE, ADT, BM, NI, ROWV, PF=2, bcm=2, wpe=None, NW=4
                       arg_out, arg_outs, i32_m, m_block, n_block, laneo, waveo, txo)
                 if const_expr(TL):
                     _tl_record(TLP, tile, bx, m_block, t0, tx)
+        if const_expr(ZRC):
+            _zero_rc_post(arg_zero, i32_zero16, ZRC_ROW16, ZRC_UPT, zpre, bx, tx, NT)
 
     @flyc.kernel(name=kname, known_block_size=[NT, 1, 1])
     def kernel(arg_x: fx.Int64, arg_xs: fx.Int64, arg_w: fx.Int64, arg_ws: fx.Int64,
                arg_wexp: fx.Int64, arg_eids: fx.Int64, arg_cumsum: fx.Int64,
                arg_sids: fx.Int64, arg_out: fx.Int64, arg_outs: fx.Int64,
                i32_m: fx.Int32, arg_zero: fx.Int64, i32_zero16: fx.Int32,
-               arg_sched: fx.Int64):
+               arg_sched: fx.Int64, arg_rc: fx.Int64):
         _entry(arg_x, arg_xs, arg_w, arg_ws, arg_wexp, arg_eids, arg_cumsum, arg_sids,
-               arg_out, arg_outs, i32_m, arg_zero, i32_zero16, arg_sched)
+               arg_out, arg_outs, i32_m, arg_zero, i32_zero16, arg_sched, arg_rc)
 
     @flyc.jit
     def launch(arg_x: fx.Int64, arg_xs: fx.Int64, arg_w: fx.Int64, arg_ws: fx.Int64,
                arg_wexp: fx.Int64, arg_eids: fx.Int64, arg_cumsum: fx.Int64,
                arg_sids: fx.Int64, arg_out: fx.Int64, arg_outs: fx.Int64,
                i32_m: fx.Int32, arg_zero: fx.Int64, i32_zero16: fx.Int32,
-               arg_sched: fx.Int64, i32_grid: fx.Int32, stream: fx.Stream):
+               arg_sched: fx.Int64, arg_rc: fx.Int64, i32_grid: fx.Int32, stream: fx.Stream):
         kernel(arg_x, arg_xs, arg_w, arg_ws, arg_wexp, arg_eids, arg_cumsum, arg_sids,
-               arg_out, arg_outs, i32_m, arg_zero, i32_zero16, arg_sched,
+               arg_out, arg_outs, i32_m, arg_zero, i32_zero16, arg_sched, arg_rc,
                value_attrs=({"rocdl.waves_per_eu": wpe} if wpe else None),
                ).launch(grid=(fx.Int64(i32_grid), 1, 1), block=(NT, 1, 1), stream=stream)
 
@@ -1031,21 +1078,28 @@ def compile_ep_gemm1(*, H, I, NE, ADT, BM, NI, ROWV, PF=2, bcm=2, wpe=None, NW=4
 
 def ep_gemm1(x, x_scale, W, sorted_ids, sorted_expert_ids, num_valid_ids, out, out_scale,
              *, adt, block_m, ni=128, rowv=None, pf=2, bcm=2, wpe=None, nw=4, arb=256,
-             zero=None, acm=2, sch=1, st=None, prio=0, tr=False, sched=None):
+             zero=None, acm=2, sch=1, st=None, prio=0, tr=False, sched=None, zero_rc=None):
     """Host launcher. ``x``: fp8 [M, H] (+ ``x_scale`` f32 [M]) or bf16 [M, H];
     ``out``: fp8 (u8) [sorted, I] + ``out_scale`` f32 [sorted, I/128], or bf16
     [sorted, I]; ``W`` from ``prepare_weights``. ``zero``: optional tensor (e.g.
     gemm2's output) the WGs set to 0 on the way (nbytes % 16 == 0). ``sched``: the
     prep's tile schedule (XCD buckets, longest tiles first) instead of the plain
-    m-major order."""
+    m-major order. ``zero_rc``: prep's local route counts -> only rows with != 1
+    route are zeroed (``zero`` = gemm2's out [M, H] run with ``single_store``)."""
     M, H = x.shape
     NE, N2, _ = W["w1"].shape
     I = N2 // 2
+    grid = _grid(sorted_expert_ids.numel() * (I // ni), sched)
+    if zero_rc is not None:
+        assert zero is not None and zero.shape == (M, H) and zero.dtype == torch.bfloat16
+        # a WG's share must span <= 2 rows (<= one row of units); else zero all rows
+        zrc = -(-(M * H * 2 // 16) // grid) <= H * 2 // 16
+    else:
+        zrc = False
     launch = compile_ep_gemm1(H=H, I=I, NE=NE, ADT=adt, BM=block_m, NI=ni,
                               ROWV=tuple(rowv or (block_m,)), PF=pf, bcm=bcm, wpe=wpe,
                               NW=nw, ARB=arb, acm=acm, SCH=sch, ST=st, PRIO=prio, TR=tr,
-                              ORDER=sched is not None)
-    grid = _grid(sorted_expert_ids.numel() * (I // ni), sched)
+                              ORDER=sched is not None, ZRC=zrc)
     _run_compiled(
         launch, x.data_ptr(), x_scale.data_ptr() if x_scale is not None else 0,
         W["w1"].data_ptr(), W["w1_scale"].data_ptr(), W["w1_exp"].data_ptr(),
@@ -1053,7 +1107,8 @@ def ep_gemm1(x, x_scale, W, sorted_ids, sorted_expert_ids, num_valid_ids, out, o
         out.data_ptr(), out_scale.data_ptr() if out_scale is not None else 0,
         int(M), zero.data_ptr() if zero is not None else 0,
         int(zero.numel() * zero.element_size() // 16) if zero is not None else 0,
-        sched.data_ptr() if sched is not None else 0, grid, torch.cuda.current_stream())
+        sched.data_ptr() if sched is not None else 0,
+        zero_rc.data_ptr() if zrc else 0, grid, torch.cuda.current_stream())
     return out
 
 
@@ -1064,7 +1119,7 @@ def ep_gemm1(x, x_scale, W, sorted_ids, sorted_expert_ids, num_valid_ids, out, o
 
 @functools.cache
 def compile_ep_gemm2(*, H, I, NE, ADT, BM, NO, ROWV, PF=2, bcm=2, wpe=None, NW=4, ARB=256,
-                     acm=2, SCH=1, ST=None, PRIO=0, TR=False, ORDER=False):
+                     acm=2, SCH=1, ST=None, PRIO=0, TR=False, ORDER=False, SST=False):
     """Stage 2: ``out[token] += w_route * (A W2^T)`` for the sorted rows of one
     expert block, NO output columns per WG (bf16x2 atomics, ``out`` pre-zeroed).
 
@@ -1095,8 +1150,10 @@ def compile_ep_gemm2(*, H, I, NE, ADT, BM, NO, ROWV, PF=2, bcm=2, wpe=None, NW=4
         f"_pf{PF}_bcm{bcm}_nw{NW}_a{ARB}" + (f"_w{wpe}" if wpe else "")
         + (f"_acm{acm}" if acm != 2 else "") + (f"_s{SCH}" if SCH != 1 else "")
         + (f"_st{ST}" if ST is not None else "") + (f"_p{PRIO}" if PRIO else "")
-        + ("_tr" if TR else "") + ("_o" if ORDER else "") + ("_tl" if TL else "")
+        + ("_tr" if TR else "") + ("_o" if ORDER else "") + ("_sst" if SST else "")
+        + ("_tl" if TL else "")
     )
+    assert not (SST and TR), "single_store: LDS-staged epilogue only"
     TLP = tl_buffer().data_ptr() if TL else 0  # closure scalar -> in the cache key
 
     def _body(lds_ptr, arg_a, arg_as, arg_w, arg_ws, arg_wexp, arg_eids, arg_sids, arg_sw,
@@ -1233,7 +1290,7 @@ def compile_ep_gemm2(*, H, I, NE, ADT, BM, NO, ROWV, PF=2, bcm=2, wpe=None, NW=4
             _scatter(R)
 
         @flyc.jit
-        def _scatter_row(rib, tok):
+        def _scatter_row(rib, tok, single):
             if tok < i32_m:  # padding rows carry token id M
                 cs = (tx % fx.Int32(32)) * fx.Int32(2)
                 base = tok * fx.Int32(N) + n_block * fx.Int32(NO) + cs
@@ -1241,22 +1298,26 @@ def compile_ep_gemm2(*, H, I, NE, ADT, BM, NO, ROWV, PF=2, bcm=2, wpe=None, NW=4
                     pk = lds_vec_load(lds_i32, (rib * fx.Int32(NO) + cs + fx.Int32(s * 64))
                                       * fx.Int32(2), Vec.make_type(2, fx.BFloat16),
                                       fx.BFloat16, align=4)
-                    llvm.AtomicRMWOp(
-                        llvm.AtomicBinOp.fadd,
-                        _gep1(_global_base_ptr1(arg_out), (base + fx.Int32(s * 64)) * fx.Int32(2)),
-                        _raw(pk), llvm.AtomicOrdering.monotonic, syncscope="agent",
-                        alignment=4)
+                    if const_expr(SST):
+                        _st_or_add_bf16x2(arg_out, base + fx.Int32(s * 64), pk, single)
+                    else:
+                        llvm.AtomicRMWOp(
+                            llvm.AtomicBinOp.fadd,
+                            _gep1(_global_base_ptr1(arg_out), (base + fx.Int32(s * 64)) * fx.Int32(2)),
+                            _raw(pk), llvm.AtomicOrdering.monotonic, syncscope="agent",
+                            alignment=4)
 
         def _scatter(R):
             ids = []
             for p in range_constexpr(-(-R // RPS)):
                 rib = fx.Int32(p * RPS) + tx // fx.Int32(32)
-                tok = fx.Int32(_global_i32_at(arg_sids, bx_m + fx.min(rib, fx.Int32(R - 1)))) \
-                    & fx.Int32(0x00FFFFFF)
-                ids.append((rib, (rib < fx.Int32(R)).select(tok, i32_m)))
+                sid = fx.Int32(_global_i32_at(arg_sids, bx_m + fx.min(rib, fx.Int32(R - 1))))
+                tok = sid & fx.Int32(0x00FFFFFF)
+                # single-route token (prep's SID_SINGLE, the sign bit): store, no atomic
+                ids.append((rib, (rib < fx.Int32(R)).select(tok, i32_m), sid < fx.Int32(0)))
             rocdl.s_waitcnt(vmcnt=0)  # token ids landed before the first atomic
             for p in range_constexpr(-(-R // RPS)):
-                _scatter_row(ids[p][0], ids[p][1])
+                _scatter_row(ids[p][0], ids[p][1], ids[p][2])
 
         if const_expr(len(ROWV) == 1):
             run_rows(BM)
@@ -1328,17 +1389,20 @@ def compile_ep_gemm2(*, H, I, NE, ADT, BM, NO, ROWV, PF=2, bcm=2, wpe=None, NW=4
 
 def ep_gemm2(a, a_scale, W, sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
              out, *, adt, block_m, no=128, rowv=None, pf=2, bcm=2, wpe=None, nw=4, arb=256,
-             acm=2, sch=1, st=None, prio=0, tr=False, sched=None):
+             acm=2, sch=1, st=None, prio=0, tr=False, sched=None, single_store=False):
     """Host launcher. ``a``: fp8 (u8) [sorted, I] + ``a_scale`` f32 [sorted, I/128] or
     bf16 [sorted, I]; ``out`` bf16 [tokens, H], pre-zeroed, atomically accumulated.
-    ``sched``: see ``ep_gemm1``."""
+    ``sched``: see ``ep_gemm1``. ``single_store``: rows of tokens with one local
+    route (prep's SID_SINGLE flag) are stored instead of atomically added, so they
+    need no zeroing (``ep_gemm1(zero_rc=...)``); ``out`` must be private to this
+    call (a store overwrites, it does not accumulate)."""
     M, H = out.shape
     NE = W["w2"].shape[0]
     sorted_rows, I = a.shape
     launch = compile_ep_gemm2(H=H, I=I, NE=NE, ADT=adt, BM=block_m, NO=no,
                               ROWV=tuple(rowv or (block_m,)), PF=pf, bcm=bcm, wpe=wpe,
                               NW=nw, ARB=arb, acm=acm, SCH=sch, ST=st, PRIO=prio, TR=tr,
-                              ORDER=sched is not None)
+                              ORDER=sched is not None, SST=single_store)
     grid = _grid(sorted_expert_ids.numel() * (H // no), sched)
     _run_compiled(
         launch, a.data_ptr(), a_scale.data_ptr() if a_scale is not None else 0,
@@ -1400,12 +1464,13 @@ def ep8_moe(x, W, topk_weights, topk_ids, *, rank, adt, cfg=None):
     rowv = cfg.get("rowv", (bm,))
     I = W["w2"].shape[2] * 2
     fp8 = adt == "fp8"
-    sids, sw, seids, nv, x8, xs, sched = ep8_prep.ep_prep(
+    sids, sw, seids, nv, x8, xs, sched, rc = ep8_prep.ep_prep(
         topk_ids, topk_weights, x, e0=rank * E, block_m=bm, quant=fp8, num_local=E)
     sorted_size = seids.numel() * bm
     sc = sched if cfg.get("sched", True) else None
-    g1 = dict(dict(rowv=rowv, sched=sc), **cfg["g1"])
-    g2 = dict(dict(rowv=rowv, sched=sc), **cfg["g2"])
+    sst = cfg.get("sst", True)  # single-route tokens: store in gemm2, no zeroing
+    g1 = dict(dict(rowv=rowv, sched=sc, zero_rc=rc if sst else None), **cfg["g1"])
+    g2 = dict(dict(rowv=rowv, sched=sc, single_store=sst), **cfg["g2"])
     if not fp8:
         g1.pop("arb", None)  # a16w4: one 128-K W chunk = 256 A bytes per row
         g2.pop("arb", None)
