@@ -1,0 +1,7 @@
+# g1_balanced.py 4096 8192 {288,576} 9  (flash H, T=8192, topk 9; balanced routing)
+# E=288: 256 rows / expert -> 576 full tasks only;  E=576: 128 rows / expert -> 1152 half tasks only
+# same FLOPs (T*topk rows). Standalone gemm1, back-to-back.
+E=288 (full only):  fp8: 254.9 us 1213.1 TFLOPS | bf16: 244.2 us 1266.6 TFLOPS | fp8: 251.8 us 1227.9 TFLOPS
+E=576 (half only):  fp8: 333.2 us  928.1 TFLOPS | bf16: 332.1 us  931.2 TFLOPS | fp8: 329.1 us  939.7 TFLOPS
+# -> per persistent worker: full task ~84 us (3 rounds), half task ~66 us (5 rounds):
+#    a half task does half the MFMAs but costs ~80% of a full one.

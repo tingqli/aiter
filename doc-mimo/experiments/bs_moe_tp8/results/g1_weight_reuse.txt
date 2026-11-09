@@ -1,0 +1,37 @@
+# g1_share.py H  (T=8192, topk 8, 256 sort blocks = 512 full tasks = 2 rounds of 256 workers;
+# 50 warm-up launches, the two variants alternated twice -- the 2nd round is shown second)
+# balanced: 256 experts x 256 rows, every task streams its own B (weights) tile
+# shared:   8 experts x 8192 rows, 32 blocks per expert share one B tile per XCD
+H4096 balanced  blocks  256:   223.4 us  1230.6 TFLOPS
+H4096 shared    blocks  256:   151.5 us  1814.6 TFLOPS
+H4096 balanced  blocks  256:   200.9 us  1368.4 TFLOPS
+H4096 shared    blocks  256:   149.1 us  1844.0 TFLOPS
+H6144 balanced  blocks  256:   315.4 us  1307.2 TFLOPS
+H6144 shared    blocks  256:   214.0 us  1926.4 TFLOPS
+H6144 balanced  blocks  256:   295.5 us  1395.3 TFLOPS
+H6144 shared    blocks  256:   213.9 us  1927.6 TFLOPS
+# -> same tasks / MFMAs, ~1.35x faster when B hits in L2 (~75 us per full task
+#    when fed): gemm1 is bound by L2-miss (fabric) traffic, not by its MFMA pipeline.
+# (A first version with only 10 warm-up launches showed 1.6x: the variant measured
+#  first still ran on cold clocks. Warm up >= 40 launches on MI350X.)
+
+# g1_bshare.py model T  (in the pipeline; gemm1 with real expert ids vs every block
+# mapped to expert 0 -- wrong output, shows the cost of the weight traffic; alternated twice)
+flash T=8192 real     prep    42.2 gemm1   241.8 down   205.2 reduce   126.8
+flash T=8192 expert0  prep    41.8 gemm1   190.8 down   204.1 reduce   125.1
+flash T=8192 real     prep    41.6 gemm1   242.4 down   203.7 reduce   126.2
+flash T=8192 expert0  prep    42.3 gemm1   189.6 down   203.7 reduce   126.2
+flash T=32768 real     prep   130.2 gemm1   679.6 down   627.2 reduce   501.7
+flash T=32768 expert0  prep   129.9 gemm1   633.5 down   609.0 reduce   501.7
+flash T=32768 real     prep   131.5 gemm1   685.6 down   630.4 reduce   501.7
+flash T=32768 expert0  prep   130.6 gemm1   634.6 down   611.0 reduce   503.2
+pro T=16384 real     prep    99.3 gemm1   634.9 down   534.1 reduce   378.0
+pro T=16384 expert0  prep    96.8 gemm1   521.4 down   522.5 reduce   377.6
+pro T=16384 real     prep   100.5 gemm1   634.8 down   535.7 reduce   376.6
+pro T=16384 expert0  prep    97.0 gemm1   524.0 down   523.1 reduce   375.7
+pro T=32768 real     prep   189.7 gemm1  1084.4 down   956.3 reduce   771.8
+pro T=32768 expert0  prep   190.6 gemm1   965.6 down   924.5 reduce   771.7
+pro T=32768 real     prep   191.8 gemm1  1093.2 down   957.5 reduce   772.2
+pro T=32768 expert0  prep   189.3 gemm1   977.0 down   926.7 reduce   771.5
+# -> upper bound of perfect weight reuse in gemm1: -21% / -7% / -18% / -11%
+#    (-52 / -49 / -112 / -118 us, 2.5-8.4% of the MoE).

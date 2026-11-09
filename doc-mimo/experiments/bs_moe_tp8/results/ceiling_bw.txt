@@ -1,0 +1,4 @@
+   64 MB  write   5.49 TB/s  copy(R+W)   6.29 TB/s  read(sum rows)   4.50 TB/s
+  256 MB  write   5.68 TB/s  copy(R+W)   4.67 TB/s  read(sum rows)   4.75 TB/s
+ 1024 MB  write   4.70 TB/s  copy(R+W)   4.62 TB/s  read(sum rows)   5.15 TB/s
+ 2048 MB  write   4.66 TB/s  copy(R+W)   4.54 TB/s  read(sum rows)   5.18 TB/s

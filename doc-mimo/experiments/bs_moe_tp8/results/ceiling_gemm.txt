@@ -1,0 +1,16 @@
+M=   8192 N= 8192 K= 8192 rowwise=0      434.5 us   2530.7 TFLOPS
+M=  16384 N= 8192 K= 8192 rowwise=0      861.7 us   2551.9 TFLOPS
+M=  65536 N=  512 K= 4096 rowwise=0      134.5 us   2043.6 TFLOPS
+M=  65536 N= 4096 K=  256 rowwise=0      165.4 us    830.8 TFLOPS
+M= 131072 N=  512 K= 4096 rowwise=0      270.2 us   2034.5 TFLOPS
+M= 131072 N= 4096 K=  256 rowwise=0      330.4 us    832.0 TFLOPS
+M= 262144 N=  512 K= 4096 rowwise=0      542.6 us   2026.4 TFLOPS
+M= 262144 N= 4096 K=  256 rowwise=0      654.0 us    840.6 TFLOPS
+M=  65536 N=  512 K= 6144 rowwise=0      194.9 us   2116.0 TFLOPS
+M=  65536 N= 6144 K=  256 rowwise=0      252.1 us    817.6 TFLOPS
+M= 131072 N=  512 K= 6144 rowwise=0      393.6 us   2095.1 TFLOPS
+M= 131072 N= 6144 K=  256 rowwise=0      505.3 us    816.0 TFLOPS
+M= 262144 N=  512 K= 6144 rowwise=0      786.7 us   2096.5 TFLOPS
+M= 262144 N= 6144 K=  256 rowwise=0      995.7 us    828.2 TFLOPS
+M=   8192 N= 8192 K= 8192 rowwise=1      496.9 us   2212.7 TFLOPS
+M=  16384 N= 8192 K= 8192 rowwise=1     1000.0 us   2199.0 TFLOPS

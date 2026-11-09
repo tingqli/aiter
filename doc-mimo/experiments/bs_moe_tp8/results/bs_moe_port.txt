@@ -1,0 +1,6 @@
+flash T=  8192: sort   34.1 quant   27.2 gemm1  242.3 down  205.1 reduce  124.1 | total   634.3 us  650.0 TFLOPS (25.6% of 2540) | rel 2.70e-03 bad 1.6e-04
+flash T= 16384: sort   47.4 quant   51.4 gemm1  385.9 down  341.1 reduce  249.0 | total  1076.5 us  766.0 TFLOPS (30.2% of 2540) | rel 2.61e-03 bad 9.3e-05
+flash T= 32768: sort   75.8 quant  106.6 gemm1  679.5 down  628.1 reduce  503.8 | total  1994.7 us  826.8 TFLOPS (32.6% of 2540) | rel 2.63e-03 bad 1.5e-05
+pro   T=  8192: sort   36.9 quant   39.9 gemm1  375.6 down  348.9 reduce  187.9 | total   988.6 us  625.6 TFLOPS (24.6% of 2540) | rel 3.06e-03 bad 8.9e-04
+pro   T= 16384: sort   51.8 quant   80.0 gemm1  636.4 down  537.3 reduce  380.5 | total  1688.1 us  732.7 TFLOPS (28.8% of 2540) | rel 2.55e-03 bad 1.3e-06
+pro   T= 32768: sort   80.1 quant  160.4 gemm1 1075.7 down  956.6 reduce  769.9 | total  3048.9 us  811.4 TFLOPS (31.9% of 2540) | rel 2.79e-03 bad 3.0e-04

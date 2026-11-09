@@ -1,0 +1,43 @@
+# Packed BF16 atomics vs plain stores on MI350X (gfx950), for the Down's write-out.
+
+## doc-mimo/experiments/atomic_bw/bench_atomic_bw.py --sizes_mb 64 256 1024 -t 8192 16384 32768
+## (H 4096, 256 experts, topk 8 = MiMo-V2.6-Flash TP8; GB/s of payload)
+== part 1: linear ceilings (GB/s)
+  64 MB:  atomic  1166.6  store4  5564.1  store16  5515.6  load16  5495.5
+ 256 MB:  atomic  1164.6  store4  5606.1  store16  5984.5  load16  5455.8
+1024 MB:  atomic  1145.2  store4  4645.6  store16  4642.9  load16  4330.7
+== part 2: gemm2 scatter traffic (us); payload = T*topk*H*2 B
+tok   8192: atomic   463.7 (1158 GB/s) + memset 11.0 | store16  114.2 (4701 GB/s) + reduce 133.6 | atomic+memset  474.7 vs store+reduce  247.8
+tok  16384: atomic   927.6 (1158 GB/s) + memset 19.7 | store16  225.8 (4755 GB/s) + reduce 269.8 | atomic+memset  947.3 vs store+reduce  495.6
+tok  32768: atomic  1848.4 (1162 GB/s) + memset 45.0 | store16  456.3 (4706 GB/s) + reduce 545.3 | atomic+memset 1893.4 vs store+reduce 1001.6
+== part 4: XCD-affine columns (every output element updated from one XCD), atomic scope
+tok   8192:  g2 agent   462.2 (1161)  xcd agent   463.4 (1159)  xcd workgroup   463.2 (1159)
+tok  16384:  g2 agent   927.6 (1158)  xcd agent   924.1 (1162)  xcd workgroup   923.7 (1162)
+tok  32768:  g2 agent  1853.6 (1158)  xcd agent  1856.1 (1157)  xcd workgroup  1856.8 (1157)
+
+## atomic_footprint.py: 64 lanes x 4 B contiguous per instruction, footprint cycled
+agent     footprint     1 MB:  267.7 G atomics/s  1.07 TB/s payload
+agent     footprint     4 MB:  271.7 G atomics/s  1.09 TB/s
+agent     footprint    16 MB:  274.5 G atomics/s  1.10 TB/s
+agent     footprint    64 MB:  293.6 G atomics/s  1.17 TB/s
+agent     footprint   256 MB:  285.7 G atomics/s  1.14 TB/s
+agent     footprint  1024 MB:  287.9 G atomics/s  1.15 TB/s
+workgroup footprint     1 MB:  268.6 G atomics/s  1.07 TB/s
+workgroup footprint  1024 MB:  288.0 G atomics/s  1.15 TB/s
+# -> ~1.1 TB/s even when the whole footprint sits in L2: the limit is the L2
+#    atomic unit, not misses / coherence scope.
+
+## atomic_lanes.py: same 128 MB, same atomic count, two lane layouts
+coalesced (32 lanes / 128 B line / instruction):  115.6 us = 1.16 TB/s
+strided   ( 8 lanes / 128 B line / instruction):  463.3 us = 0.29 TB/s
+# -> cost is per request (cache line), not per lane. The Down epilogue holds
+#    8 consecutive BF16 (16 B) per lane, 8 lanes per row: as packed atomics that
+#    is the strided layout.
+
+## Lower bound of an atomic Down: payload / 1.16 TB/s (coalesced layout, nothing else)
+flash  8192:  463 us   (store Down + reduce today: 206 + 126 = 332 us)
+flash 16384:  926 us   (344 + 250 = 594)
+flash 32768: 1851 us   (628 + 501 = 1129)
+pro    8192:  694 us   (349 + 188 = 537)
+pro   16384: 1389 us   (538 + 379 = 917)
+pro   32768: 2777 us   (966 + 782 = 1748)

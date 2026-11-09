@@ -1,0 +1,28 @@
+# ab_gemm1.py flash:8192 flash:32768 pro:16384  (standalone, back-to-back; min / median of 5 x 20 iters, us)
+# ref_bf16 = reference a8w8_blockscale_gemm1 (bf16 mid); new_bf16 = bs_gemm1 bf16; new_fp8 = bs_gemm1 fused FP8 quant
+flash 8192   ref_bf16  241.9/ 245.0  new_bf16  242.5/ 245.4  new_fp8  251.3/ 252.8
+flash 32768  ref_bf16  713.8/ 716.0  new_bf16  718.3/ 720.7  new_fp8  735.4/ 737.4
+pro 16384    ref_bf16  680.2/ 681.1  new_bf16  682.4/ 682.7  new_fp8  691.5/ 693.9
+# The fused epilogue costs +8..17 us over the bf16 store; the separate quant of the
+# bf16 mid costs 16 / 43 / 26 us in the reference pipeline (ref_baseline.txt q2): net -8 .. -26 us.
+# bf16 mode is bit-exact with the reference kernel (flash 512/8192/16384, pro 8192, both k_rotate;
+# checked with the earlier 257 / 9 routing).
+
+# The two experiments below ran with the earlier routing shapes (flash 257 experts / topk 9,
+# pro 385 / 9); their conclusions are what the defaults are based on.
+
+# g1_pers_pipe.py (in the pipeline, gemm1 persistent workers vs one workgroup per task)
+flash T=8192   persistent: gemm1 302.5 | total  730.1   one WG per task: gemm1 314.0 | total  742.0
+flash T=16384  persistent: gemm1 473.4 | total 1202.3   one WG per task: gemm1 463.3 | total 1196.3
+flash T=32768  persistent: gemm1 803.9 | total 2164.7   one WG per task: gemm1 833.9 | total 2206.4
+pro T=8192     persistent: gemm1 443.9 | total 1080.6   one WG per task: gemm1 466.6 | total 1111.3
+pro T=16384    persistent: gemm1 740.1 | total 1863.1   one WG per task: gemm1 753.6 | total 1865.5
+pro T=32768    persistent: gemm1 1248.5 | total 3410.8  one WG per task: gemm1 1261.4 | total 3397.1
+
+# g1_group.py (in the pipeline, task order group_size_m; outputs identical)
+flash T=8192   g=1 gemm1 301.3 | g=2 302.4 | g=4 302.1
+flash T=32768  g=1 gemm1 795.4 | g=2 792.3 | g=4 779.7
+pro T=16384    g=1 gemm1 726.4 | g=2 825.2 | g=4 833.9
+# -> keep persistent + group_size_m=1.
+
+# xcc_map.py: HW_REG_XCC_ID == workgroup id % 8 for grids of 256 / 512 / 2048 (MI350X).

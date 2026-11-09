@@ -5,7 +5,8 @@
 - A8W4 gemm1、gemm2 单独抽出的 kernel 和测试；
 - 2-kernel 端到端流程，以及单 kernel 融合 MoE；
 - TP8 下 gemm2 + all-reduce 的卡间通讯实验，包括跨卡 atomic、跨卡 store/load 带宽，以及自研 two-shot all-reduce；
-- EP8（专家并行，每卡 32 个专家、inter 2048）专用的 a8w4 / a16w4 kernel（第 8 节）。
+- EP8（专家并行，每卡 32 个本地专家、inter 2048）专用的 a8w4 / a16w4 kernel（第 8 节）；
+- MiMo-V2.6 Flash / Pro TP8 的 FP8 blockscale fused MoE，在 MI350X（gfx950）上（第 9 节）。
 
 这些改动有实测收益，但依赖测试文件里的私有 kernel、HIP IPC 和特定 shape，难以直接 upstream，所以集中存档在这里。
 
@@ -29,6 +30,11 @@ doc-mimo/
     ep8_moe.py                          # EP8：gemm1 / gemm2（a8w4、a16w4）、配置表、ep8_moe 入口
     test_ep8_prep.py / test_ep8_moe.py  # EP8：prep 与 moe_sorting / 调度参考实现对比；gemm1 / gemm2 正确性
     ep8_small.py / test_ep8_small.py    # EP8：小 batch 单 kernel 融合实验（正确，但没有比 3-launch 快）
+    bs_moe.py                           # FP8 blockscale MoE（gfx950）：4 次 launch 的流程、MODELS、fp8_blockscale_moe 入口
+    bs_prep.py                          # 路由排序 + x 量化 + inverse map（1 次 launch）
+    bs_gemm1.py / bs_down.py / bs_reduce.py  # gate|up（epilogue 融合 FP8 量化）/ M128 Down / topk 求和
+    bs_common.py                        # 上面几个 kernel 共用的 helper
+    test_bs_moe.py                      # fp32 参考实现、正确性 pytest、分 stage 计时 CLI
   comm/                                 # 卡间通讯实验（torchrun --nproc_per_node=8）
     peer_atomic_probe.py                # 跨卡 bf16x2 atomic：正确性 + 带宽
     peer_store_probe.py                 # 跨卡普通 store（push）/ load（pull）带宽
@@ -57,6 +63,10 @@ AITER_CONFIG_FMOE=$PWD/mimo_v2.6_flash_a8w4_tuned_fmoe.csv \
 python doc-mimo/kernels/test_ep8_prep.py -t 1 16 1024 16384
 python doc-mimo/kernels/test_ep8_moe.py g1 -t 16 4096 --adt fp8 bf16 --bm 128 --rowv 32,64,128 --nw 8 --sch 3 --tr 1
 python doc-mimo/experiments/ep8_e2e/bench_e2e.py -t 1 16 256 1024 4096 16384 --adt fp8 bf16 --cfg auto
+
+# FP8 blockscale MoE（TP8，gfx950）
+pytest -q doc-mimo/kernels/test_bs_moe.py
+python doc-mimo/kernels/test_bs_moe.py --check -m flash pro -t 8192 16384 32768
 
 # 8 卡
 torchrun --nproc_per_node=8 doc-mimo/kernels/twoshot_allreduce.py -t 128 512 2048 -r uniform --tile 32,128,1
@@ -506,6 +516,115 @@ ISA（`fast_decode/isa_dump.sh`）：
 - 小 batch：把 prep 合进 gemm1（gemm1 自己读路由），或与上一层重叠；只有 1–8 个专家活跃时用 split-K，让更多 CU 读 W。
 - 中等 batch：a8w4 gemm1 的量化组跨 WG（NI=64 时相邻 WG 交换行 amax），把 tile 切细，减少轮次量化。
 - 大 batch：按 8.6 重写 gemm2（更大的 M tile，解码后的 W 经 LDS 在 wave 间共用）；提高 gemm1 的 MFMA 利用率。
+
+---
+
+## 9. FP8 blockscale MoE（TP8，MI350X / gfx950）
+
+**目标：** 参考 `tq/moe_gemm_blockscale` 分支的 FP8 blockscale MoE，为 XiaomiMiMo/MiMo-V2.6-Flash-RL 和
+MiMo-V2.6-Pro-RL 的 TP8 MoE 形状实现 fused MoE，8192 / 16384 / 32768 tokens 尽量逼近 compute-bound。
+不考虑通讯融合。每卡形状（MiMo 没有 shared expert）：flash H 4096、I 256、256 个专家、topk 8；pro H 6144、
+I 256、384 个专家、topk 8。权重 FP8 + 128×128 block scale，激活按 (行, 128) 量化。硬件是 8× MI350X（256 CU），
+FlyDSL 0.3.4.1。
+
+代码在 `kernels/bs_*.py`，实验和原始数据在 `experiments/bs_moe_tp8/`。
+
+### 9.1 结论
+
+随机路由，单位 us（`experiments/bs_moe_tp8/results/bs_moe_fused.txt`、`ref_baseline.txt`）：
+
+| case | 本实现 | TFLOPS | 参考分支 | 加速 | 计算下限 | 访存下限 | 各 stage 下限之和 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| flash 8192 | 617 | 669 | 656 | 1.06× | 162 | 423 | 423 |
+| flash 16384 | 1046 | 788 | 1109 | 1.06× | 325 | 685 | 773 |
+| flash 32768 | 1942 | 849 | 2053 | 1.06× | 649 | 1208 | 1493 |
+| pro 8192 | 969 | 638 | 1021 | 1.05× | 244 | 752 | 752 |
+| pro 16384 | 1654 | 748 | 1726 | 1.04× | 487 | 1141 | 1197 |
+| pro 32768 | 3039 | 814 | 3423 | 1.13× | 974 | 1919 | 2273 |
+
+- 计算下限按 hipBLASLt FP8 8192³ 实测的 2540 TF；访存下限按 5 TB/s，只算必须读写的字节；各 stage 下限是
+  每个 kernel 取 max(计算, 访存) 再求和。参考分支在同一张卡上取最快的 Down 配置。
+- **这些形状上整个 MoE 是 memory-bound，不是 compute-bound：** 访存下限是计算下限的 1.9–3.1 倍。Down 的
+  输出是每个 (token, slot) 一行 H 维 BF16，写出后又被 topk 求和读回，光这部分就占总时间的 33–44%；
+  Down 的 K 只有 256，即使 hipBLASLt 跑同形状的 dense GEMM 也只有 816–841 TF。
+- **Down 直接 atomic 累加在这块卡上更慢**（9.3）：packed BF16 atomic 上限约 1.16 TB/s，只有 store 的 1/4。
+- rocprofv3 的 fabric 流量显示，除 prep 外每个 stage 都在 4.1–5.1 TB/s：Down、reduce 已在访存下限附近；
+  gemm1（1100–1610 TF）是剩余差距的主要来源，它的 L2 命中率只有 33–52%，w1 从 L2 之外重复读了
+  2.1–4.6 遍。
+- 相对参考分支快 1.04–1.13 倍。pro 32768 的 1.13 倍主要来自 Down 输出超过 4 GB 的修复（参考分支只能退回
+  8wave Down）；其余来自配置（2–3%）和两处融合（2.0–2.8%）。
+
+### 9.2 流程：4 次 launch，没有 host 同步，workspace 全部预分配
+
+1. **`bs_prep`**：替代 moe_sorting + per_1x128 quant + invert_sorted_ids。每个 WG 在 LDS 里统计自己那部分路由
+   （LDS atomic 顺便给出每条路由的 rank），每个专家用一次全局 atomic 预留区间，到达 grid barrier 后先量化
+   自己的 x 行（等待藏在这段流式读写后面），再做 block scan、scatter、填 padding 和 block 的专家号；
+   最后一个 WG 清零计数器（可以放进 graph）。
+2. **`bs_gemm1`**：参考分支的 8 wave、256×256 tile、半 M 流水（persistent，底部没有路由的 block 走 128 行
+   流水）。epilogue 里 SiLU·up 后直接按 (行, 128) 量化成 FP8：128 列分布在 4 个 lane 组 × 4 个 N wave，
+   lane 间用 shuffle、wave 间经 LDS 求 amax。共享一行的 4 个 wave 正好是同一个 stagger 组，只要一次 barrier。
+3. **`bs_down`**：参考分支的 M128 Down（persistent，per-XCD 队列），乘路由权重后按 sorted 行写 BF16 route
+   buffer。输出的 buffer descriptor 改为每个 M128 block 一个（64 位基址），route buffer 可以超过 4 GB。
+   oc4（流水线内 A/B 选出）。
+4. **`bs_reduce`**：按 inverse map 把每个 token 的 topk 行按 slot 顺序加起来（结果确定）。
+
+`stages(..., prep="aiter", fuse_quant=False)` 可以切回 CK sort + hip quant 和 BF16 mid + aiter quant；
+`down_out="atomic"` 把 3、4 换成清零 out + Down 直接 atomic 累加。都只用于对照。
+
+### 9.3 Down 为什么不用 atomic 写出
+
+之前 gfx942 上的 TP 实验（第 7 节 `atomic_bw`、`gemm2_bm128`）里，gemm2 直接 atomic 写出在 ≥8192 tokens 时比
+store + reduce 快：那里 atomic 约 1.5 TB/s，是 store 的 1/3，而且 A8W4 gemm2 要解码 fp4，计算够长，atomic 写出
+大部分被盖住。MI350X 上这两点都不成立（`experiments/bs_moe_tp8/results/atomic.txt`、`down_out_ab.txt`）：
+
+- packed BF16 atomic 只有 1.16 TB/s（dwordx4 store 4.7 TB/s）。每个输出元素只由一个 XCD 更新、scope 改成
+  workgroup，或者数据全在 L2 里（1 MB footprint），都还是 1.07–1.17 TB/s：瓶颈是 L2 的 atomic 单元。
+- 代价按 cache line 请求算，不按 lane 算：同样的字节数和 atomic 条数，每条指令 32 lane 写满一行是 1.16 TB/s，
+  8 lane 一行只有 0.29 TB/s。Down 的 epilogue 每个 lane 持有一行里连续 8 个 BF16，直接做成 packed atomic 正好是
+  8 lane 一行：实测 Down（含清零）是 store Down + reduce 的 5.5–7 倍，端到端慢 3.6–4.5 倍。
+- 即使经 LDS 重排成 32 lane 一行，atomic 写出本身最少也要 payload / 1.16 TB/s：flash 463 / 926 / 1851 us、
+  pro 694 / 1389 / 2777 us，而现在的 Down + reduce 合计 332 / 594 / 1129、537 / 917 / 1748 us。FP8 Down 的计算
+  只要 54–325 us，盖不住这么长的 atomic。atomic 版每个输出还多 7 次 BF16 舍入（相对误差 4.1e-3 vs 2.6e-3）。
+
+### 9.4 过程与发现（细节见 `experiments/bs_moe_tp8/README.md`）
+
+| 步骤 | 发现 / 做法 | 效果 |
+|---|---|---|
+| 测平台上限和参考分支 | hipBLASLt FP8 2540 TF；HBM 4.5–5.2 TB/s；参考分支 pro 32768 的 M128 Down 断言失败 | 确定下限和基线 |
+| 移植 + 修 >4 GB | Down 每个 M128 block 自己的 descriptor | pro 32768 能用 M128 Down，−11% |
+| gemm1 epilogue 量化 | 第一版两次 barrier 会把两个 stagger 组串起来，改成一次 | gemm1 +8–17 us，省掉 16–43 us 的 quant |
+| bs_prep | 一次 launch 完成排序、量化和 inverse map | prep 快 20–50 us，端到端净省 13–37 us |
+| 流量分析 | 各 stage 的 fabric 流量；gemm1 在权重共享时快约 1.35 倍 | 定位 gemm1 受 L2 复用限制 |
+| Down atomic 写出 | 微基准 + 直接改 Down 的 epilogue | 慢 3.6–4.5 倍，保留 store + reduce |
+| gemm1 per-XCD 分批同步 | 每轮 32 个 worker 齐步开始，结果逐位一致 | pro 32768 gemm1 1231 → 1390 us（旧形状），放弃 |
+| 其他 | group_size_m、非 persistent、去掉空 slice 的 MFMA、prep 更多行在途 | 没有收益 |
+
+最初按参考分支 model_configs 里的 257 / 9、385 / 9 测过一轮（多算了一个 shared expert）；上面的数字已全部按
+256 / 8、384 / 8 重测，少数只在旧形状上做过的辅助实验在实验 README 里注明。
+
+### 9.5 经验与坑
+
+- **先看 fabric 流量再判断瓶颈。** `TCC_EA0_RDREQ_sum × 128 B` 与 reduce 实际读的字节数一致，可以直接用来算
+  带宽。gemm1 看起来是流水（barrier）受限，实际在 flash 8192 时已经卡在 fabric 带宽上（5.1 TB/s）。
+- **atomic 的代价按请求算。** 同样字节数，lane 布局决定 4 倍差别；判断 atomic 方案前先测目标卡的 atomic 上限，
+  不能直接沿用其他卡（gfx942 是 store 的 1/3，gfx950 是 1/4）。
+- **task 顺序和 XCD 映射不等于 L2 复用。** MI350X 上 WG 的 XCD 就是 `bx % 8`（实测）；连续的 task 分到同一
+  XCD，只有在它们同时运行、进度接近时才能共享 L2。强制齐步的代价（等最慢的 worker）比省下的流量更大。
+- **自旋等待不要用普通 load。** 在 persistent 循环里用 `raw_ptr_buffer_load(aux=sc0|sc1)` 自旋，GPU 死循环
+  （GPU 利用率显示 0%，host 卡在 synchronize），很可能是 LLVM 把 load 当成循环不变量提到了循环外。改用
+  atomic add 0 后正常（LLVM 把它变成 atomic load，ISA 里留在循环内）。`bs_prep` 的 grid barrier 也一起改了。
+- **计时要充分预热，并以流水线内的分 stage 时间为准。** MI350X 的时钟在前几十次连续 launch 里会变，只预热
+  10 次时先测的一方偏慢（权重共享实验一度得出 1.6 倍，充分预热、交替测量后是 1.35 倍）。单独连续跑一个
+  kernel 和在流水线里也不同：prep 单独测快 15–31%。
+- **K 循环里的运行时 `if` 代价很大：** gemm1 里加一个就有上千个 VGPR spill 和 waterfall DMA，变体要做成编译期分支。
+
+### 9.6 后续方向
+
+- gemm1：让同一专家的 task 稳定地同时运行（half / full task 分开调度，按专家绑定 CU 组），或重写为每阶段
+  更多 MFMA、更少 barrier 的流水（当前 256 VGPR 已满）。按测量，权重完全复用时 gemm1 能快 7–21%。
+- prep：专家内的行序改成按 token 递增后，看流水线里的 gemm1 是否能拿回 3–15 us（单独测两种顺序一样快）。
+- Down + reduce 的 route 流量是结构性的，atomic 在这块卡上更慢；只有改变数据流（在片上累加 topk）才能去掉，
+  代价是权重重复读取。
 
 ---
 

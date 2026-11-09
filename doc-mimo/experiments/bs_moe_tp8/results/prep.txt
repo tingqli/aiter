@@ -1,0 +1,18 @@
+# prep_vs_aiter.py flash:8192 flash:32768 pro:8192 pro:32768 (grid 256, 512 threads)
+# Checks (3 repeated launches each, last shown): num_valid_ids, block expert ids, per-expert
+# (id, weight) multisets vs CK moe_sorting; a8 / sa vs aiter per_1x128 quant; inverse map.
+flash T=8192 rep2: nv True seids True rows True a8 False (1 diff) sa True inv True
+flash T=8192: ck sort + hip quant   48.0 us   bs_prep   29.9 us
+flash T=32768 rep2: nv True seids True rows True a8 False (2 diff) sa True inv True
+flash T=32768: ck sort + hip quant  143.3 us   bs_prep  111.4 us
+pro T=8192 rep2: nv True seids True rows True a8 False (1 diff) sa True inv True
+pro T=8192: ck sort + hip quant   51.4 us   bs_prep   39.1 us
+pro T=32768 rep2: nv True seids True rows True a8 False (4 diff) sa True inv True
+pro T=32768: ck sort + hip quant  192.3 us   bs_prep  162.7 us
+# a8: 1-4 of 34-201 M bytes differ by one FP8 step, all at near-ties: e.g. flash 8192
+# x/scale = 0.00683593716, FP8 midpoint 0.0068359375 -> bs_prep 0.005859375 (exact RNE),
+# aiter 0.0078125 (its f32 x * rcp(scale) lands just above the midpoint).
+# Standalone timings repeat the same x back-to-back; inside the pipeline (after the reduce)
+# prep takes 42 / 131 / 57 / 194 us (bs_moe_fused.txt).
+# Tried (earlier 257 / 9 routing): 4 rows in flight per wave (no faster), grid 512 (slower),
+# 256 threads (same).

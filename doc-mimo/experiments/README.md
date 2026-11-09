@@ -8,7 +8,8 @@
 
 除特别注明外，脚本都在**仓库根目录**下运行。如果 aiter 导入 `pyhip.contrib` 失败，在命令前加 `PYTHONPATH=$PWD/doc-mimo/experiments/tools/pyhip_shim`。机器是共享的，测量前先用 `doc-mimo/experiments/tools/wait_gpu_idle.sh` 等 GPU 空闲。
 
-目标 shape：model_dim 4096、256 个专家、topk 8。TP8 下每卡 inter_dim 为 256；fd1/fd2 那组实验主要用 inter_dim 512。硬件为 8× MI325X（gfx942）。
+目标 shape：model_dim 4096、256 个专家、topk 8。TP8 下每卡 inter_dim 为 256；fd1/fd2 那组实验主要用 inter_dim 512。硬件为 8× MI325X（gfx942）；第 9 节例外，是 8× MI350X（gfx950）上的
+FP8 blockscale MoE。
 
 ## 1. standalone gemm1 / gemm2（TP8 shape）
 
@@ -95,6 +96,14 @@
 | [ep8_roofline](ep8_roofline/) | 750 W 功耗墙下的实测上限：HBM 纯读 3.6 TB/s；hipBLASLt fp8 1117 / 1002 TF（gemm1 / gemm2 形状），bf16 637 / 571 TF；时钟只有 1.2–1.4 GHz |
 | [ep8_baseline](ep8_baseline/) | TP 调好的 a8w4 2-kernel 直接跑 EP8 shape：16 tokens 149 us、4096 tokens 668 us、16384 tokens 2275 us；EP8 专用 kernel 快 1.2–2.3 倍 |
 | [ep8_e2e](ep8_e2e/) | EP8 专用 3-launch（prep → gemm1 → gemm2）：a8w4 / a16w4 在 16 tokens 64 / 73 us（1.6 / 1.8 倍 mem 下限），1024 tokens 188 / 240 us（1.11 / 1.18 倍 mem + 计算），16384 tokens 1288 / 1726 us（1.7 / 1.3 倍计算下限）。本轮：`_opaque_tx` 消除全部 spill；prep 生成按代价切段 + 重块优先的 tile 调度（4096 tokens −9% / −14%，热点路由不退化）；≤8 tokens 的窄 tile 配置（a16w4 −20–26%）；按 token 数自动选配置；参考 pyhip 的 single_store（单路 token 直接 store、只清零其余行：gemm2 −4 ~ −6%）。per-XCD atomic 工作队列、persistent、专家整块分 XCD 等方案都试过并放弃 |
+
+## 9. FP8 blockscale MoE（MiMo-V2.6 Flash / Pro TP8，MI350X / gfx950）
+
+完整设计见 `doc-mimo/README.md` 第 9 节。这一组在 MI350X 上测，不是 MI325X。
+
+| 实验 | 结论 |
+|---|---|
+| [bs_moe_tp8](bs_moe_tp8/) | 4-launch 流程（prep 合并排序 + 量化，gemm1 epilogue 融合 FP8 量化，M128 Down，topk 求和），形状 256 专家 / topk 8（flash）、384 / 8（pro）：8192 / 16384 / 32768 tokens 下 flash 617 / 1046 / 1942 us，pro 969 / 1654 / 3039 us，比参考分支快 1.04–1.13 倍，达到 2540 TF 计算下限的 25–33%。这些形状是 memory-bound：访存下限是计算下限的 1.9–3.1 倍，route buffer 的写和读占 33–44%；Down、reduce 已在 4.2–4.8 TB/s，gemm1 受 L2 复用限制（权重从 L2 外重复读 2.1–4.6 遍，完全复用的上限是 gemm1 快 7–21%）。Down 改用 packed BF16 atomic 累加更慢：MI350X 的 atomic 上限 1.16 TB/s（store 的 1/4，与 scope、footprint 无关），且按 cache line 请求计费，直接改 Down 端到端慢 3.6–4.5 倍。per-XCD 分批同步、group_size_m、非 persistent 都更慢 |
 
 ## 工具与记录
 
