@@ -45,6 +45,10 @@ def compile_moe_gemm2(
         activation,
         swiglu_limit,
     )
+    if weight_quant_type == "block":
+        assert K % 128 == 0, "Blockscale Down requires K divisible by 128"
+        assert N % 128 == 0, "Blockscale Down requires N divisible by 128"
+        assert BLOCK_TILE_SIZE_N in (64, 128)
     if alg == "batch1":
         assert K % TILE_K == 0, "batch1 Down requires K divisible by 64"
     if alg == "prefill_1x4":
@@ -91,7 +95,12 @@ def compile_moe_gemm2(
         weight_dtype = fx.Float8E4M3FNUZ
 
     TensorWithIndex, _read_sorted_index, gemm_splitk = make_gemm_helpers(
-        K, weight_dtype, BLOCK_TILE_SIZE_M, TOPK
+        K,
+        weight_dtype,
+        BLOCK_TILE_SIZE_M,
+        TOPK,
+        N=N,
+        weight_quant_type=weight_quant_type,
     )
 
     def _apply_down_scale(c_frag, tid, expert_id, blk_n, p_w_scale):
@@ -138,7 +147,12 @@ def compile_moe_gemm2(
     def _make_down_weight_view(p_weight, expert_id):
         element_num = 16 // (p_weight.dtype.width // 8)
         return fx.make_view(
-            p_weight + fx.Int64(expert_id * N * K),
+            p_weight
+            + (
+                fx.Int64(expert_id) * N * K
+                if const_expr(weight_quant_type == "block")
+                else fx.Int64(expert_id * N * K)
+            ),
             fx.make_layout(
                 ((16, N // 16), (element_num, K // element_num)),
                 ((element_num, 16 * K), (1, 16 * element_num)),
@@ -226,6 +240,8 @@ def compile_moe_gemm2(
                 arg_p_weight,
                 lds,
                 splitk_waves=1,
+                p_w_scale=p_w_scale,
+                expert_id=expert_id,
             )
 
             _apply_down_scale(c_frag, tid, expert_id, blk_n, p_w_scale)
@@ -321,6 +337,8 @@ def compile_moe_gemm2(
                 None,
                 splitk_waves=1,
                 a_with_index=False,
+                p_w_scale=p_w_scale,
+                expert_id=expert_id,
             )
 
             _apply_down_scale(c_frag, tid, expert_id, blk_n, p_w_scale)

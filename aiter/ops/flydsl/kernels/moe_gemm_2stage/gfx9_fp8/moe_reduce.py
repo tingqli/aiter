@@ -96,3 +96,63 @@ def sorted_sum(TOPK, N, output_padding_bytes=0):
         )
 
     return callable
+
+
+@functools.cache
+def invert_sorted_ids(TOPK):
+    num_threads = 64
+
+    @flyc.kernel(known_block_size=[num_threads, 1, 1])
+    def invert_sorted_ids_kernel(
+        sorted_ids: fx.Pointer,
+        invert: fx.Pointer,
+        p_num_valid: fx.Pointer,
+        num_ids: fx.Uint32,
+        batch_size: fx.Uint32,
+    ):
+        batch = fx.block_idx.x
+        tid = fx.thread_idx.x
+        slot = batch * num_threads + tid
+        # Ignore the uninitialized tail beyond num_valid.
+        num_valid = p_num_valid[0].to(fx.Uint32)
+        if slot < num_valid:
+            sid = sorted_ids[slot].to(fx.Uint32)
+            tok_id = sid & 0xFFFFFF
+            top_id = sid >> 24
+            idx = tok_id * TOPK + top_id
+            if top_id < TOPK and tok_id < batch_size:
+                invert[idx] = fx.Uint32(slot)
+
+    @flyc.jit
+    def launch(
+        sorted_ids: fx.Pointer,
+        invert: fx.Pointer,
+        p_num_valid: fx.Pointer,
+        num_ids: fx.Uint32,
+        batch_size: fx.Uint32,
+        stream,
+    ):
+        grid_size = fxh.div_up(num_ids, num_threads)
+        invert_sorted_ids_kernel(
+            sorted_ids, invert, p_num_valid, num_ids, batch_size
+        ).launch(grid=(grid_size, 1, 1), block=(num_threads, 1, 1), stream=stream)
+
+    def callable(
+        sorted_ids: torch.Tensor,
+        invert: torch.Tensor,
+        num_valid: torch.Tensor,
+        num_ids: int,
+        batch_size: int,
+    ):
+        stream = torch.cuda.current_stream()
+        _run_compiled(
+            launch,
+            _ptr(sorted_ids),
+            _ptr(invert),
+            _ptr(num_valid),
+            fx.Uint32(num_ids),
+            fx.Uint32(batch_size),
+            stream,
+        )
+
+    return callable
