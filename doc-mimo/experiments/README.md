@@ -103,7 +103,7 @@ FP8 blockscale MoE。
 
 | 实验 | 结论 |
 |---|---|
-| [bs_moe_tp8](bs_moe_tp8/) | 4-launch 流程（prep 合并排序 + 量化，gemm1 epilogue 融合 FP8 量化，M128 Down，topk 求和），形状 256 专家 / topk 8（flash）、384 / 8（pro）：8192 / 16384 / 32768 tokens 下 flash 617 / 1046 / 1942 us，pro 969 / 1654 / 3039 us，比参考分支快 1.04–1.13 倍，达到 2540 TF 计算下限的 25–33%。这些形状是 memory-bound：访存下限是计算下限的 1.9–3.1 倍，route buffer 的写和读占 33–44%；Down、reduce 已在 4.2–4.8 TB/s，gemm1 受 L2 复用限制（权重从 L2 外重复读 2.1–4.6 遍，完全复用的上限是 gemm1 快 7–21%）。Down 改用 packed BF16 atomic 累加更慢：MI350X 的 atomic 上限 1.16 TB/s（store 的 1/4，与 scope、footprint 无关），且按 cache line 请求计费，直接改 Down 端到端慢 3.6–4.5 倍。per-XCD 分批同步、group_size_m、非 persistent 都更慢 |
+| [bs_moe_tp8](bs_moe_tp8/) | 4-launch 流程（prep 合并排序 + 量化，gemm1 epilogue 融合 FP8 量化，M128 Down，topk 求和），形状 256 专家 / topk 8（flash）、384 / 8（pro）：8192 / 16384 / 32768 tokens 下 flash 617 / 1046 / 1942 us，pro 969 / 1654 / 3039 us，比参考分支快 1.04–1.13 倍，达到 2540 TF 计算下限的 25–33%。这些形状是 memory-bound：访存下限是计算下限的 1.9–3.1 倍，route buffer 的写和读占 33–44%；Down、reduce 已在 4.2–4.8 TB/s，gemm1 受 L2 复用限制（权重从 L2 外重复读 2.1–4.6 遍，完全复用的上限是 gemm1 快 7–21%）。Down 改用 packed BF16 atomic 累加更慢：MI350X 的 atomic 上限 1.16 TB/s（store 的 1/4，与 scope、footprint 无关），且按 cache line 请求计费，直接改 Down 端到端慢 3.6–4.5 倍。per-XCD 分批同步、group_size_m、非 persistent 都更慢。小 token（512–4096）：新写的 bs_small（每个专家一个 WG，gate\|up + Down 一个 kernel，权重只读一遍）在 T=64 时就是纯权重流（5.2–5.6 TB/s），但 512 / 1024 的参考（aiter asm）已在访存下限的 1.17–1.27 倍，bs_small 即使把计算全藏住也只快 1.14–1.22 倍，实测 0.87–0.95 倍，停止优化；2048 / 4096 用 bs_moe 快 1.05–1.10 倍（pro 2048 慢 7%）。atomic 与 HBM 读流基本不重叠；128 个 CU 就能跑满 HBM |
 
 ## 工具与记录
 

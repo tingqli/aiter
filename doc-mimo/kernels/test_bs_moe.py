@@ -6,6 +6,8 @@
       pytest -q doc-mimo/kernels/test_bs_moe.py
     PYTHONPATH=$PWD/doc-mimo/experiments/tools/pyhip_shim \
       python doc-mimo/kernels/test_bs_moe.py -m flash pro -t 8192 16384 32768
+    PYTHONPATH=$PWD/doc-mimo/experiments/tools/pyhip_shim \
+      python doc-mimo/kernels/test_bs_moe.py --small -t 512 1024 2048 4096  # bs_small
 
 Reference: FP32 math on the quantized operands for a random subset of tokens
 (x and A2 quantized per (row, 128) with scale = amax / 448, exactly the
@@ -26,6 +28,7 @@ from aiter.fused_moe import fused_topk  # noqa: E402
 from aiter.ops.shuffle import shuffle_weight  # noqa: E402
 
 from bs_moe import F8, MODELS, stages  # noqa: E402
+import bs_small  # noqa: E402
 
 FP8_MAX = 448.0
 PEAK_FP8_TFLOPS = 2540.0  # hipBLASLt FP8 8192^3 on this MI350X (experiments/bs_moe_tp8)
@@ -122,8 +125,8 @@ def check(out, ref, label=""):
     return rel, bad
 
 
-def run_moe(case, **kw):
-    fns, out = stages(
+def run_moe(case, small=False, **kw):
+    fns, out = (bs_small.stages if small else stages)(
         case["x"], case["w1"], case["w1_scale"], case["w2"], case["w2_scale"],
         case["topk_weights"], case["topk_ids"], **kw,
     )
@@ -198,6 +201,14 @@ def test_target(model, tokens):
     _correct(model, tokens)
 
 
+# bs_small: T=64 leaves experts without rows; m=32 at T=1024 makes most experts
+# take several passes.
+@pytest.mark.parametrize("model", ["flash", "pro"])
+@pytest.mark.parametrize("tokens,m", [(64, None), (1024, 32)])
+def test_bs_small(model, tokens, m):
+    _correct(model, tokens, small=True, m=m)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("-m", "--model", nargs="+", default=["flash", "pro"])
@@ -207,16 +218,18 @@ def main():
     p.add_argument("--no-fuse", action="store_true")
     p.add_argument("--prep", default="fused", choices=["fused", "aiter"])
     p.add_argument("--down-out", default="store", choices=["store", "atomic"])
+    p.add_argument("--small", action="store_true", help="bs_small (one WG per expert)")
     p.add_argument("--check", action="store_true", help="subset correctness check")
     p.add_argument("--iters", type=int, default=20)
     a = p.parse_args()
     for model in a.model:
         for T in a.tokens:
             case = make_case(model, T, routing=a.routing)
-            fns, out = run_moe(
-                case, down_splits=a.splits, fuse_quant=not a.no_fuse, prep=a.prep,
+            kw = dict(small=True) if a.small else dict(
+                down_splits=a.splits, fuse_quant=not a.no_fuse, prep=a.prep,
                 down_out=a.down_out,
             )
+            fns, out = run_moe(case, **kw)
             msg = ""
             if a.check:
                 idx = torch.randperm(T, device="cuda")[:256]

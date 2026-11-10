@@ -1,7 +1,8 @@
 # bs_moe_tp8：MiMo-V2.6 TP8 的 FP8 blockscale fused MoE（MI350X / gfx950）
 
 代码在 `doc-mimo/kernels/bs_*.py`，入口 `bs_moe.fp8_blockscale_moe()`；kernel 从参考分支
-`tq/moe_gemm_blockscale`（50ed9814c2）移植后再优化。本目录是测量脚本和原始结果。
+`tq/moe_gemm_blockscale`（50ed9814c2）移植后再优化。512–4096 tokens 的 `bs_small` 见“小 token”一节。
+本目录是测量脚本和原始结果。
 
 形状（TP8 每卡，路由专家数 / topk 取自 HF config，MiMo 没有 shared expert）：flash H 4096、I 256、
 256 个专家、topk 8；pro H 6144、I 256、384 个专家、topk 8。权重 FP8 e4m3fn + 128×128 FP32 block scale，
@@ -84,6 +85,66 @@ payload / 1.16 TB/s：
 输出还要多做 7 次 BF16 舍入（相对误差 4.1e-3，store + reduce 是 2.6e-3）。所以保留 route buffer + reduce。
 `down_out="atomic"` 留作对照，默认不用。
 
+## 小 token（512–4096）：`bs_small`，已停止优化
+
+后续目标是 512 / 1024 / 2048 / 4096 tokens 比参考分支大幅提升。结论：512 / 1024 在物理上做不到（参考已接近 HBM
+下限），新写的 `bs_small` 停在当前状态；2048 / 4096 用 `bs_moe` 比参考快 5–10%（pro 2048 慢 7%）。
+
+| case | 参考最快 | 参考来源 | bs_small | bs_moe | 加速（我们最快） | 访存下限 | 参考 / 下限 |
+|---|---:|---|---:|---:|---:|---:|---:|
+| flash 512 | 203.8 | asm 1-stage | **214.8** | 245.3 | 0.95× | 167 | 1.22× |
+| flash 1024 | 230.7 | asm 1-stage | **266.5** | 266.8 | 0.87× | 181 | 1.27× |
+| flash 2048 | 319.8 | asm 1-stage | 350.3 | **304.5** | 1.05× | 211 | 1.52× |
+| flash 4096 | 427.2 | 参考分支 FlyDSL | 772.8 | **389.9** | 1.10× | 269 | 1.59× |
+| pro 512 | 425.3 | asm 1-stage | **464.8** | 479.6 | 0.92× | 364 | 1.17× |
+| pro 1024 | 456.9 | asm 1-stage | **511.6** | 518.5 | 0.89× | 386 | 1.18× |
+| pro 2048 | 535.2 | asm 1-stage | 697.6 | **575.6** | 0.93× | 430 | 1.25× |
+| pro 4096 | 729.7 | 参考分支 FlyDSL | 1157.9 | **688.6** | 1.06× | 518 | 1.41× |
+
+- 单位 us，随机路由。参考取两者中较快的：aiter fused_moe 的 36 个 asm / CK 候选（按 256 / 8、384 / 8 重新扫，
+  CUDA graph 计时，`results/ref_small.txt`），和参考分支的 FlyDSL 流水线（`ref_baseline.py`，event 计时）。
+  参考分支自己的 tuned CSV（257 / 9）在 512–2048 也派发到 CK / asm，只有 ≥4096 用 FlyDSL。
+- 我们的数是 CUDA graph 计时（`small_graph_time.py`，`results/bs_small.txt`；逐 launch 的 event 计时多 0–4%）。
+  只和参考分支的 FlyDSL 流水线比（同为 event 计时：flash 269.8 / 285.7 / 329.0 / 427.2，pro 496.5 / 529.8 /
+  600.6 / 729.7），flash 512 快 1.23 倍，其余快 1.04–1.07 倍。
+- 访存下限 = (全部专家的权重 + route 写一次读一次 + x / out) / 5.3 TB/s。这些 T 下每个专家都有路由，权重
+  （flash 805 MB、pro 1.81 GB）至少要读一遍；5.3 TB/s 是 bs_small 实测的权重流速度。“参考 / 下限”就是理论上
+  最多能快多少：512 / 1024 只有 1.17–1.27 倍。
+
+**`bs_small` 的做法**（`kernels/bs_small.py`，3 次 launch：x 量化、main、topk 求和）：每个专家一个 WG（8 wave，
+每 CU 一个），自己扫 topk_ids 找出所有行（不排序），做完 gate|up（两个 128 列的 intermediate chunk，SiLU·up
+按 (行, 128) 量化后留在 LDS）再做 Down。权重从 global 直接读进 VGPR（shuffle_weight(16, 16) 的 MFMA 布局），
+提前两个 64 KB step，gate|up 和 Down 连成一条不断流的权重流；A 走 swizzle 过的 LDS 双缓冲。每个专家的
+W1、W2 只从 HBM 读一遍。
+
+**为什么停：**
+
+1. **上限太低。** bs_small 在 T=64 时几乎没有计算，main 就是纯权重流：flash 153.6 us（5.2 TB/s）、pro 323.2 us
+   （5.6 TB/s），整体 170.8 / 340.3 us。T=512 的 main 比这多 45 / 115 us，是没藏住的计算和同步。就算全部藏到
+   权重流后面（只加上 route 写出和 sum 随 T 增加的部分），flash 512 / 1024 约 179 / 192 us，pro 约 356 / 376 us，
+   也只比参考快 1.14–1.22 倍，而且要重写流水。
+2. **T 大了结构不对。** 一个 WG 包一个专家，M 变大后单个 CU 的计算跟不上：pro 4096 的 main 1015 us，是纯权重流
+   的 3.1 倍；flash 4096 的 M 受 LDS（160 KB）限制最多 144，大专家要读两遍权重。pro 有 384 个专家、256 个 CU，
+   要跑两轮：权重流不受影响（128 个 CU 就能跑满 HBM，见下），但没藏住的计算要付两次（pro 512 多 115 us，
+   flash 只多 45 us）。2048 / 4096 用 bs_moe 更快。
+3. **atomic 也救不了。** 用 atomic 直接写 out 可以省掉 sum（512 / 1024 时 10–24 us），但 atomic 和权重流基本
+   不重叠（见下面 `atomic_overlap`），只 route 写出就要 payload / 1.1 TB/s（flash 512 时 30 us），比省下的多。
+
+**支撑实验：**
+
+- `cu_bw.py`（`results/cu_bw.txt`）：每 CU 一个 WG 流式读自己的区域。128 个 CU 就到 5.1 TB/s（40 GB/s/CU），
+  64 个 CU 只有 3.2 TB/s（单 CU 上限约 50 GB/s）；每 CU 32 KB 在途就够。
+- `atomic_overlap.py`（`results/atomic_overlap.txt`）：同样的流式读里每 64 KB 插入 A 条 wave 级 packed BF16
+  atomic。读 155–158 us、atomic 单独 24 us 时，两者一起是 178 us（4 MB 目标）/ 192 us（32 MB 目标）：
+  atomic 的时间几乎全部加在读上面，目标大时比单独跑还多。
+
+**如果还要继续：**
+
+- 512 / 1024 最多再快 14–22%。在 flash 512 上用 s_memrealtime 打点时，所有 WG 的执行跨度是 171 us，比 event
+  时间 198 us 少 27 us；这段 kernel 首尾的时间原因没查清，是最先该看的地方。
+- 2048 / 4096 的空间在 bs_moe（参考 / 下限 1.25–1.59 倍）：这些 T 下 gemm1 读 w1 只有 3.2–4.1 TB/s
+  （flash 512 / 4096：130.5 / 166.2 us 读 537 MB），Down + reduce 的 route 流量也还在。
+
 ## 运行
 
 在仓库根目录下（aiter 导入 `pyhip.contrib` 失败时加 `PYTHONPATH=$PWD/doc-mimo/experiments/tools/pyhip_shim`）：
@@ -110,6 +171,14 @@ python doc-mimo/experiments/bs_moe_tp8/ceiling_bw.py
 # 每个 stage 的 fabric 流量
 rocprofv3 --pmc TCC_EA0_RDREQ_sum TCC_EA0_WRREQ_sum TCC_EA0_WRREQ_64B_sum -d /tmp/rp -o rw \
   --output-format csv -- python doc-mimo/experiments/bs_moe_tp8/prof_l2.py flash 8192
+# 小 token：bs_small 正确性和分 stage 计时、与 bs_moe 的 graph 计时对照、参考（aiter 候选 / 参考分支）、微基准
+pytest -q doc-mimo/kernels/test_bs_moe.py -k bs_small
+python doc-mimo/kernels/test_bs_moe.py --small -t 64 512 1024 2048 4096 --check
+python doc-mimo/experiments/bs_moe_tp8/small_graph_time.py flash,pro 512,1024,2048,4096
+python doc-mimo/experiments/bs_moe_tp8/ref_small.py --gpus 0 1 2 3 4 5 6 7
+python doc-mimo/experiments/bs_moe_tp8/ref_baseline.py -t 512 1024 2048 4096 --down m128p 8wave --splits 2 4 --warm 40
+python doc-mimo/experiments/bs_moe_tp8/cu_bw.py
+python doc-mimo/experiments/bs_moe_tp8/atomic_overlap.py
 ```
 
 ## 细节

@@ -1,0 +1,39 @@
+# python doc-mimo/kernels/test_bs_moe.py --small -t 64 512 1024 2048 4096 --check   (bs_small, CUDA events)
+flash T=    64: xquant    9.1 main  153.6 sum    6.7 | total   170.8 us   18.9 TFLOPS ( 0.7% of 2540) | rel 2.76e-03 bad 3.4e-04
+flash T=   512: xquant    9.5 main  198.5 sum   10.3 | total   218.7 us  117.8 TFLOPS ( 4.6% of 2540) | rel 2.49e-03 bad 2.9e-06
+flash T=  1024: xquant    9.8 main  245.7 sum   16.7 | total   272.4 us  189.2 TFLOPS ( 7.4% of 2540) | rel 2.51e-03 bad 9.5e-07
+flash T=  2048: xquant   10.8 main  318.4 sum   29.3 | total   358.2 us  287.8 TFLOPS (11.3% of 2540) | rel 2.46e-03 bad 9.5e-07
+flash T=  4096: xquant   16.8 main  678.7 sum   69.4 | total   765.3 us  269.4 TFLOPS (10.6% of 2540) | rel 2.48e-03 bad 6.7e-06
+pro   T=    64: xquant   10.1 main  323.2 sum    6.5 | total   340.3 us   14.2 TFLOPS ( 0.6% of 2540) | rel 2.47e-03 bad 5.1e-06
+pro   T=   512: xquant   10.6 main  438.0 sum   13.8 | total   463.5 us   83.4 TFLOPS ( 3.3% of 2540) | rel 2.65e-03 bad 8.7e-05
+pro   T=  1024: xquant   11.2 main  473.6 sum   23.6 | total   508.2 us  152.1 TFLOPS ( 6.0% of 2540) | rel 2.62e-03 bad 7.9e-05
+pro   T=  2048: xquant   13.7 main  636.0 sum   44.6 | total   694.5 us  222.6 TFLOPS ( 8.8% of 2540) | rel 2.73e-03 bad 2.7e-04
+pro   T=  4096: xquant   21.9 main 1015.4 sum   99.9 | total  1137.5 us  271.8 TFLOPS (10.7% of 2540) | rel 2.59e-03 bad 9.5e-05
+
+# python doc-mimo/kernels/test_bs_moe.py -t 512 1024 2048 4096 --check   (bs_moe, CUDA events)
+flash T=   512: prep   21.3 gemm1  130.5 down   91.2 reduce   11.5 | total   256.4 us  100.5 TFLOPS ( 4.0% of 2540) | rel 2.58e-03 bad 3.6e-05
+flash T=  1024: prep   23.3 gemm1  136.9 down   96.0 reduce   19.0 | total   275.4 us  187.2 TFLOPS ( 7.4% of 2540) | rel 2.45e-03 bad 0.0e+00
+flash T=  2048: prep   25.8 gemm1  141.8 down  112.1 reduce   35.3 | total   315.2 us  327.1 TFLOPS (12.9% of 2540) | rel 2.52e-03 bad 1.9e-06
+flash T=  4096: prep   28.6 gemm1  166.2 down  140.7 reduce   65.4 | total   400.6 us  514.6 TFLOPS (20.3% of 2540) | rel 2.51e-03 bad 2.4e-05
+pro   T=   512: prep   27.5 gemm1  269.7 down  178.7 reduce   15.4 | total   493.1 us   78.4 TFLOPS ( 3.1% of 2540) | rel 2.65e-03 bad 6.4e-06
+pro   T=  1024: prep   29.7 gemm1  277.0 down  188.2 reduce   28.1 | total   522.3 us  148.0 TFLOPS ( 5.8% of 2540) | rel 2.59e-03 bad 3.3e-05
+pro   T=  2048: prep   32.7 gemm1  284.0 down  209.9 reduce   50.6 | total   576.8 us  268.1 TFLOPS (10.6% of 2540) | rel 2.58e-03 bad 1.9e-06
+pro   T=  4096: prep   34.0 gemm1  300.9 down  263.6 reduce   96.5 | total   696.2 us  444.2 TFLOPS (17.5% of 2540) | rel 2.60e-03 bad 6.4e-05
+
+# python doc-mimo/experiments/bs_moe_tp8/small_graph_time.py flash,pro 512,1024,2048,4096   (end-to-end, events vs CUDA-graph replay)
+flash T=  512 bs_small: events   218.2 us  graph   214.8 us
+flash T=  512 bs_moe  : events   255.5 us  graph   245.3 us
+flash T= 1024 bs_small: events   273.2 us  graph   266.5 us
+flash T= 1024 bs_moe  : events   270.2 us  graph   266.8 us
+flash T= 2048 bs_small: events   361.6 us  graph   350.3 us
+flash T= 2048 bs_moe  : events   306.4 us  graph   304.5 us
+flash T= 4096 bs_small: events   770.6 us  graph   772.8 us
+flash T= 4096 bs_moe  : events   392.3 us  graph   389.9 us
+pro   T=  512 bs_small: events   461.5 us  graph   464.8 us
+pro   T=  512 bs_moe  : events   496.8 us  graph   479.6 us
+pro   T= 1024 bs_small: events   513.8 us  graph   511.6 us
+pro   T= 1024 bs_moe  : events   521.2 us  graph   518.5 us
+pro   T= 2048 bs_small: events   700.3 us  graph   697.6 us
+pro   T= 2048 bs_moe  : events   578.5 us  graph   575.6 us
+pro   T= 4096 bs_small: events  1161.3 us  graph  1157.9 us
+pro   T= 4096 bs_moe  : events   694.1 us  graph   688.6 us

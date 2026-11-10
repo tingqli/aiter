@@ -1,0 +1,14 @@
+# python doc-mimo/experiments/bs_moe_tp8/cu_bw.py
+# one WG per CU streams its own region (dwordx4, U loads per thread in flight); `active` WGs read
+U= 4 ( 32 KB/CU in flight) active=256:   416.6 us  5.15 TB/s   20.1 GB/s/CU
+U= 4 ( 32 KB/CU in flight) active=192:   310.1 us  5.19 TB/s   27.1 GB/s/CU
+U= 4 ( 32 KB/CU in flight) active=128:   210.4 us  5.10 TB/s   39.9 GB/s/CU
+U= 4 ( 32 KB/CU in flight) active= 64:   169.3 us  3.17 TB/s   49.6 GB/s/CU
+U= 8 ( 64 KB/CU in flight) active=256:   409.3 us  5.25 TB/s   20.5 GB/s/CU
+U= 8 ( 64 KB/CU in flight) active=192:   309.4 us  5.21 TB/s   27.1 GB/s/CU
+U= 8 ( 64 KB/CU in flight) active=128:   209.7 us  5.12 TB/s   40.0 GB/s/CU
+U= 8 ( 64 KB/CU in flight) active= 64:   168.2 us  3.19 TB/s   49.9 GB/s/CU
+U=16 (128 KB/CU in flight) active=256:   413.3 us  5.20 TB/s   20.3 GB/s/CU
+U=16 (128 KB/CU in flight) active=192:   309.5 us  5.20 TB/s   27.1 GB/s/CU
+U=16 (128 KB/CU in flight) active=128:   208.7 us  5.15 TB/s   40.2 GB/s/CU
+U=16 (128 KB/CU in flight) active= 64:   167.8 us  3.20 TB/s   50.0 GB/s/CU

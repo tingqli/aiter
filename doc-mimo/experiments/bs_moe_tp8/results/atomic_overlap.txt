@@ -1,0 +1,10 @@
+# python doc-mimo/experiments/bs_moe_tp8/atomic_overlap.py
+A = atomic instructions per wave per 64 KB of WG reads (each 256 B)
+out  4 MB A=1: read+atomic   177.6 us (4.53 TB/s rd, 0.14 TB/s atomic) | atomic only    23.5 us (1.05 TB/s) | read only   158.4 us
+out  4 MB A=2: read+atomic   180.5 us (4.46 TB/s rd, 0.27 TB/s atomic) | atomic only    44.8 us (1.10 TB/s) | read only   155.6 us
+out  4 MB A=4: read+atomic   191.5 us (4.21 TB/s rd, 0.51 TB/s atomic) | atomic only    86.9 us (1.13 TB/s) | read only   156.8 us
+out  4 MB A=8: read+atomic   213.2 us (3.78 TB/s rd, 0.92 TB/s atomic) | atomic only   171.2 us (1.15 TB/s) | read only   156.9 us
+out 32 MB A=1: read+atomic   192.1 us (4.19 TB/s rd, 0.13 TB/s atomic) | atomic only    24.1 us (1.02 TB/s) | read only   155.3 us
+out 32 MB A=2: read+atomic   204.4 us (3.94 TB/s rd, 0.24 TB/s atomic) | atomic only    44.6 us (1.11 TB/s) | read only   155.5 us
+out 32 MB A=4: read+atomic   216.5 us (3.72 TB/s rd, 0.46 TB/s atomic) | atomic only    87.3 us (1.13 TB/s) | read only   155.0 us
+out 32 MB A=8: read+atomic   228.3 us (3.53 TB/s rd, 0.86 TB/s atomic) | atomic only   172.1 us (1.15 TB/s) | read only   156.9 us
