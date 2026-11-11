@@ -45,7 +45,7 @@ import test_a8w4_gemm2_bm128 as B  # noqa: E402
 from aiter import dtypes  # noqa: E402
 from aiter.fused_moe import moe_sorting  # noqa: E402
 from aiter.ops.flydsl.kernels import buffer_ops as bo  # noqa: E402
-from aiter.ops.flydsl.kernels.act import silu_mul_batch  # noqa: E402
+from aiter.ops.flydsl.kernels.act import gate_up_act, situ_params  # noqa: E402
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import _pack_activation, quantize_rows  # noqa: E402
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.utils import _global_i32_at, _udiv, _umod  # noqa: E402
 from aiter.ops.flydsl.kernels.mxfp4_gemm_common import lds_typed_ptr, lds_vec_load  # noqa: E402
@@ -66,8 +66,10 @@ TRACE_N = 4096
 
 
 @functools.cache
-def compile_a8w4_fmoe_bm64q(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=1, n_ctas=608):
+def compile_a8w4_fmoe_bm64q(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=1, n_ctas=608,
+                            act="silu"):
     H, INTER = D_HIDDEN, D_INTER
+    assert act in ("silu", "situv2"), act
     N1 = 2 * INTER
     K1_TILES = H // TILE_K1
     NT2 = H // TILE_N2
@@ -79,10 +81,12 @@ def compile_a8w4_fmoe_bm64q(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=1, n_c
     SC2_STRIDE = (INTER // 256) * 64
     WS2_BYTES = NE * H * (INTER // 32)
     kname = (f"a8w4_fmoe_bm64q_h{H}_i{INTER}_ne{NE}_k{TOPK}_bcm{b_cache_mod}_c{n_ctas}"
-             f"{'_noat' if B.NO_ATOMIC else ''}{'_' + DBG if DBG else ''}")
+             f"{'_noat' if B.NO_ATOMIC else ''}{'_' + DBG if DBG else ''}"
+             f"{'' if act == 'silu' else '_' + act}")
 
     def _cta(lds_ptr, arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-             arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_a2, arg_sc, arg_ctl, i32_epoch):
+             arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_a2, arg_sc, arg_ctl, i32_epoch,
+             situ):
         tx = fx.Int32(gpu.thread_id("x"))
         bx = fx.Int32(gpu.block_id("x"))
         lane = tx % fx.Int32(64)
@@ -271,8 +275,8 @@ def compile_a8w4_fmoe_bm64q(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=1, n_c
                         rsc = xs[mi * 4 + ii]
                         row = fx.Int32(mi * 16 + ii) + lane_div_16 * fx.Int32(4)
                         for ni in range_constexpr(N_REPEAT):
-                            y = silu_mul_batch([ag[ni][ii] * (rsc * f_g[ni])],
-                                               [au[ni][ii] * (rsc * f_u[ni])])[0]
+                            y = gate_up_act(act, [ag[ni][ii] * (rsc * f_g[ni])],
+                                            [au[ni][ii] * (rsc * f_u[ni])], situ)[0]
                             col = n_wave_base + fx.Int32(ni * 16) + lane_mod_16
                             stg[row * fx.Int32(TILE_N1) + col] = y.to(fx.BFloat16)
                 gpu.barrier()
@@ -572,19 +576,28 @@ def compile_a8w4_fmoe_bm64q(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=1, n_c
                arg_exp1: fx.Int64, arg_w2: fx.Int64, arg_ws2: fx.Int64, arg_eids: fx.Int64,
                arg_cumsum: fx.Int64, arg_stids: fx.Int64, arg_sw: fx.Int64,
                arg_out: fx.Int64, i32_M: fx.Int32, arg_a2: fx.Int64, arg_sc: fx.Int64,
-               arg_ctl: fx.Int64, i32_epoch: fx.Int32):
+               arg_ctl: fx.Int64, i32_epoch: fx.Int32, f_b: fx.Float32, f_br: fx.Float32,
+               f_lb: fx.Float32, f_lbr: fx.Float32, f_lim: fx.Float32):
+        if const_expr(act == "situv2"):
+            situ = situ_params(fx.Float32(f_b), fx.Float32(f_br), fx.Float32(f_lb),
+                               fx.Float32(f_lbr), fx.Float32(f_lim))
+        else:
+            situ = None
         lds_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         _cta(lds_ptr, arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-             arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_a2, arg_sc, arg_ctl, i32_epoch)
+             arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_a2, arg_sc, arg_ctl, i32_epoch,
+             situ)
 
     @flyc.jit
     def launch(arg_x: fx.Int64, arg_xs: fx.Int64, arg_w1: fx.Int64, arg_ws1: fx.Int64,
                arg_exp1: fx.Int64, arg_w2: fx.Int64, arg_ws2: fx.Int64, arg_eids: fx.Int64,
                arg_cumsum: fx.Int64, arg_stids: fx.Int64, arg_sw: fx.Int64,
                arg_out: fx.Int64, i32_M: fx.Int32, arg_a2: fx.Int64, arg_sc: fx.Int64,
-               arg_ctl: fx.Int64, i32_epoch: fx.Int32, stream: fx.Stream):
+               arg_ctl: fx.Int64, i32_epoch: fx.Int32, f_b: fx.Float32, f_br: fx.Float32,
+               f_lb: fx.Float32, f_lbr: fx.Float32, f_lim: fx.Float32, stream: fx.Stream):
         kernel(arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
                arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_a2, arg_sc, arg_ctl, i32_epoch,
+               f_b, f_br, f_lb, f_lbr, f_lim,
                value_attrs={"rocdl.waves_per_eu": 2},
                ).launch(grid=(n_ctas, 1, 1), block=(256, 1, 1), stream=stream)
 
@@ -617,7 +630,8 @@ def _workspace(n_blocks, device):
 
 def a8w4_fmoe_bm64q(x_fp8, x_scale, weights, sorted_ids, sorted_weights,
                     sorted_expert_ids, num_valid_ids, out, *, topk=8, b_cache_mod=1,
-                    n_ctas=None):
+                    n_ctas=None, act="silu", situ_beta=1.0, situ_linear_beta=1.0,
+                    swiglu_limit=float("inf")):
     """Persistent work-queue fused stage1 + stage2 (inputs as
     test_a8w4_fmoe_bm64.a8w4_fmoe_bm64)."""
     assert weights["w1_fast_dec"] == 2 and weights["w2_fast_dec"] == 2
@@ -628,14 +642,15 @@ def a8w4_fmoe_bm64q(x_fp8, x_scale, weights, sorted_ids, sorted_weights,
     ws = _workspace(sorted_expert_ids.numel(), out.device)
     launch = compile_a8w4_fmoe_bm64q(
         D_HIDDEN=model_dim, D_INTER=weights["w1"].shape[1] // 2, NE=E, TOPK=topk,
-        b_cache_mod=b_cache_mod, n_ctas=n_ctas)
+        b_cache_mod=b_cache_mod, n_ctas=n_ctas, act=act)
     _run_compiled(
         launch, x_fp8.data_ptr(), x_scale.data_ptr(), weights["w1"].data_ptr(),
         weights["w1_scale"].data_ptr(), weights["w1_exp"].data_ptr(),
         weights["w2"].data_ptr(), weights["w2_scale"].data_ptr(),
         sorted_expert_ids.data_ptr(), num_valid_ids.data_ptr(), sorted_ids.data_ptr(),
         sorted_weights.data_ptr(), out.data_ptr(), int(tokens), ws["a2"].data_ptr(),
-        ws["sc"].data_ptr(), ws["ctl"].data_ptr(), ws["epoch"], torch.cuda.current_stream())
+        ws["sc"].data_ptr(), ws["ctl"].data_ptr(), ws["epoch"],
+        *G1.situ_args(situ_beta, situ_linear_beta, swiglu_limit), torch.cuda.current_stream())
     return out
 
 

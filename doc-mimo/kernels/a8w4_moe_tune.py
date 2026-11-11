@@ -72,7 +72,7 @@ def prepare_weights(w1, w2, w1_scale, w2_scale):
     return M.a8w4_prepare_weights(w1, w2, w1_scale, w2_scale, fast_dec=2)
 
 
-def random_weights(model_dim, inter_dim, experts, seed=0):
+def random_weights(model_dim, inter_dim, experts, seed=0, return_raw=False):
     torch.manual_seed(seed)
     w1 = torch.randn((experts, inter_dim * 2, model_dim), dtype=dtypes.bf16, device="cuda")
     w2 = torch.randn((experts, model_dim, inter_dim), dtype=dtypes.bf16, device="cuda")
@@ -80,10 +80,13 @@ def random_weights(model_dim, inter_dim, experts, seed=0):
     w1q, w1s = tq(w1, quant_dtype=dtypes.fp4x2)
     w2q, w2s = tq(w2, quant_dtype=dtypes.fp4x2)
     del w1, w2
-    return prepare_weights(
+    W = prepare_weights(
         shuffle_weight_a16w4(w1q.view(experts, inter_dim * 2, model_dim // 2), 16, False),
         shuffle_weight_a16w4(w2q.view(experts, model_dim, inter_dim // 2), 16, False),
         shuffle_scale_a16w4(w1s, experts, False), shuffle_scale_a16w4(w2s, experts, False))
+    if return_raw:  # unshuffled mxfp4 + e8m0, for torch_ref
+        return W, dict(w1q=w1q, w1s=w1s, w2q=w2q, w2s=w2s)
+    return W
 
 
 def make_routing(x, experts, topk, routing="uniform"):
@@ -136,15 +139,19 @@ def candidates(model_dim, inter_dim):
     return out
 
 
-def run_config(cfg, x, W, topk_weights, topk_ids):
-    """Run one candidate end to end (moe_sorting + x quant + kernels)."""
+def run_config(cfg, x, W, topk_weights, topk_ids, act="silu", situ=None):
+    """Run one candidate end to end (moe_sorting + x quant + kernels).
+    ``act`` "silu" | "situv2"; ``situ``: dict of situ_beta / situ_linear_beta /
+    swiglu_limit (runtime launch args)."""
+    akw = dict(act=act, **(situ or {}))
     E, model_dim, _ = W["w2"].shape
     topk = topk_ids.shape[1]
     if cfg["kind"] == "1k":
         return F.fused_moe_a8w4_bm64(x, W, topk_weights, topk_ids, b_cache_mod=cfg["bcm"],
-                                     waves_per_eu=cfg["wpe"], ksplit=cfg["ksplit"])
+                                     waves_per_eu=cfg["wpe"], ksplit=cfg["ksplit"], **akw)
     if cfg["kind"] == "1kq":
-        return Q.fused_moe_a8w4_bm64q(x, W, topk_weights, topk_ids, b_cache_mod=cfg["bcm"])
+        return Q.fused_moe_a8w4_bm64q(x, W, topk_weights, topk_ids, b_cache_mod=cfg["bcm"],
+                                      **akw)
     assert cfg["kind"] == "2k", cfg
     bm = cfg["block_m"]
     inter = W["w1"].shape[1] // 2
@@ -157,7 +164,7 @@ def run_config(cfg, x, W, topk_weights, topk_ids):
     G1.a8w4_gemm1(x8, xs, W["w1"], W["w1_scale"], W["w1_exp"], sids, seids, nv, buf,
                   num_experts=E, tile_m=bm, epilog="q8s", inter_dim=inter, topk=topk,
                   tile_n=128, b_cache_mod=cfg["g1_bcm"], xcd_swizzle=1, dyn_m=bm > 32,
-                  fast_dec=2)
+                  fast_dec=2, **akw)
     nd = sorted_size * inter
     a2 = buf[:nd].view(torch.float8_e4m3fnuz).view(sorted_size, inter)
     a2s = buf[nd:].view(torch.float32).view(sorted_size, groups)
@@ -221,13 +228,15 @@ def lookup_config(num_tokens, model_dim, inter_dim, experts, topk, routing="unif
     return rows[-1][1]
 
 
-def tuned_moe(x, weights, topk_weights, topk_ids, *, csv_path=DEFAULT_CSV, routing="uniform"):
+def tuned_moe(x, weights, topk_weights, topk_ids, *, csv_path=DEFAULT_CSV, routing="uniform",
+              act="silu", situ=None):
     """A8W4 MoE (bf16 x [tokens, H] -> bf16 [tokens, H]) with the tuned kernel for
-    this batch size. ``weights`` from ``prepare_weights`` (fd2)."""
+    this batch size. ``weights`` from ``prepare_weights`` (fd2). ``act``/``situ``
+    as ``run_config`` (the table was tuned with silu)."""
     E, model_dim, _ = weights["w2"].shape
     cfg = lookup_config(x.shape[0], model_dim, weights["w1"].shape[1] // 2, E,
                         topk_ids.shape[1], routing, csv_path)
-    return run_config(cfg, x, weights, topk_weights, topk_ids)
+    return run_config(cfg, x, weights, topk_weights, topk_ids, act, situ)
 
 
 # =============================================================================
@@ -304,6 +313,86 @@ def _write_rows(csv_path, new_rows):
         w.writerows(merged)
 
 
+def _name_to_cfg(name):
+    """Inverse of ``config_name`` (the best_2k / best_1k CSV columns)."""
+    p = name.split()
+    if p[0] == "2k":
+        return dict(kind="2k", block_m=int(p[1][2:]), g1_bcm=int(p[2][5:]), g2=p[3][2:])
+    if p[0] == "1k":
+        return dict(kind="1k", block_m=64, bcm=int(p[2][3:]), wpe=int(p[3][1:]),
+                    ksplit=int(p[4][2:]))
+    return dict(kind="1kq", block_m=64, bcm=int(p[2][3:]))
+
+
+def torch_ref(x, raw, topk_weights, topk_ids, act="silu", situ=None):
+    """fp32 MoE reference from bf16 x and the unshuffled mxfp4 weights: stage1 +
+    act (``G1.act_ref``: SiTUv2 incl. the clamp) -> bf16 -> torch_moe_stage2."""
+    from aiter.fused_moe import torch_moe_stage2
+    from aiter.utility import fp4_utils
+
+    tokens, H = x.shape
+    topk = topk_ids.shape[1]
+    E, N = raw["w1q"].shape[0], raw["w1q"].numel() * 2 // (raw["w1q"].shape[0] * H)
+    inter = N // 2
+    w1q = raw["w1q"].view(E, N, H // 2)
+    w1s = fp4_utils.e8m0_to_f32(raw["w1s"]).view(E, N, H // 32, 1)
+    a = x.float()
+    o1 = torch.zeros((tokens, topk, inter), dtype=torch.float32, device=x.device)
+    for e in topk_ids.unique().tolist():
+        mask = topk_ids == e
+        w = (fp4_utils.mxfp4_to_f32(w1q[e]).view(N, H // 32, 32) * w1s[e]).view(N, H)
+        gate, up = (a[mask.nonzero()[:, 0]] @ w.t()).split(inter, dim=-1)
+        o1[mask] = G1.act_ref(gate, up, act, situ)
+    w2q = raw["w2q"].view(E, H, inter // 2)
+    return torch_moe_stage2(
+        o1.to(dtypes.bf16), w1q.view(dtypes.fp4x2), w2q.view(dtypes.fp4x2), topk_weights,
+        topk_ids, dtype=dtypes.bf16, quant_type=QuantType.per_1x32,
+        w2_scale=raw["w2s"].view(E, H, inter // 32), a2_scale=None, doweight=True)
+
+
+def compare_act(model_dim, inter_dim, experts, topk, routing, tokens, csv_path, reps=3,
+                situ=None, log=print):
+    """silu vs situv2 per CSV point: the tuned config plus the CSV's best 2-kernel and
+    best fused config. Same weights / x / routing, both acts timed back to back in
+    one process. Correctness: cos vs the torch reference of that act."""
+    situ = dict(G1.SITU if situ is None else situ)
+    W, raw = random_weights(model_dim, inter_dim, experts, return_raw=True)
+    table = {}
+    with open(csv_path) as fh:
+        for r in csv.DictReader(fh):
+            if (int(r["model_dim"]), int(r["inter_dim"]), int(r["experts"]), int(r["topk"]),
+                    r["routing"]) == (model_dim, inter_dim, experts, topk, routing):
+                table[int(r["num_tokens"])] = r
+    tokens = tokens or sorted(table)
+    out = []
+    for tok in tokens:
+        r = table[1 << max(0, (tok - 1).bit_length())]
+        torch.manual_seed(3000 + tok)
+        x = torch.randn((tok, model_dim), dtype=dtypes.bf16, device="cuda")
+        tw, ti = make_routing(x, experts, topk, routing)
+        refs = {a: torch_ref(x, raw, tw, ti, a, situ).float() for a in G1.ACTS}
+        cfgs = {"tuned": _row_to_cfg(r)}
+        for col in ("best_2k", "best_1k"):
+            c = _name_to_cfg(r[col])
+            if c not in cfgs.values():
+                cfgs[col] = c
+        for role, cfg in cfgs.items():
+            row = dict(tokens=tok, role=role, cfg=config_name(cfg))
+            for a in G1.ACTS:
+                fn = lambda a=a: run_config(cfg, x, W, tw, ti, a, situ)  # noqa: E731
+                c = G1._cos_diff(refs[a], fn().float())
+                row[f"{a} us"] = _timed(fn, reps)
+                row[f"{a} cos"] = c
+                assert c < 1e-2, f"{config_name(cfg)} {a} tok {tok}: cos {c:.2e}"
+            row["situv2/silu"] = row["situv2 us"] / row["silu us"]
+            log(f"tok {tok:6d} {role:8s} {row['cfg']:24s} silu {row['silu us']:8.1f} us "
+                f"situv2 {row['situv2 us']:8.1f} us  x{row['situv2/silu']:.3f}  "
+                f"cos {row['silu cos']:.1e}/{row['situv2 cos']:.1e}")
+            out.append(row)
+        del x
+    return out
+
+
 def verify(model_dim, inter_dim, experts, topk, routing, tokens, csv_path, reps=3, log=print):
     """tuned_moe at each point (and at non-power-of-2 counts): time vs the CSV entry
     and vs the default 2-kernel config; output vs the default config."""
@@ -337,15 +426,28 @@ def verify(model_dim, inter_dim, experts, topk, routing, tokens, csv_path, reps=
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["tune", "verify"])
+    p.add_argument("mode", choices=["tune", "verify", "compare-act"])
     p.add_argument("--shape", default="4096,256,256,8", help="model_dim,inter_dim,E,topk")
     p.add_argument("--routing", default="uniform", choices=ROUTINGS)
     p.add_argument("-t", type=int, nargs="*", default=None,
                    help="num_tokens (tune default 1, 2, 4 .. 32768)")
     p.add_argument("--csv", default=DEFAULT_CSV)
     p.add_argument("--reps", type=int, default=3)
+    p.add_argument("--situ", default=None,
+                   help="compare-act: beta,linear_beta,limit (default G1.SITU = 4,25,64)")
     args = p.parse_args()
     H, I, E, K = (int(v) for v in args.shape.split(","))
+    if args.mode == "compare-act":
+        import pandas as pd
+
+        situ = None
+        if args.situ:
+            b, lb, lim = (float(v) for v in args.situ.split(","))
+            situ = dict(situ_beta=b, situ_linear_beta=lb, swiglu_limit=lim)
+        rows = compare_act(H, I, E, K, args.routing, args.t, args.csv, args.reps, situ,
+                           log=lambda s: print(s, flush=True))
+        print(pd.DataFrame(rows).to_markdown(index=False, floatfmt=".4g"))
+        return
     if args.mode == "tune":
         toks = args.t or [1 << i for i in range(16)]
         tune(H, I, E, K, args.routing, toks, args.csv, args.reps,

@@ -50,7 +50,7 @@ import aiter  # noqa: E402
 from aiter import ActivationType, QuantType, dtypes  # noqa: E402
 from aiter.fused_moe import fused_topk, moe_sorting, torch_moe_stage1, torch_moe_stage2  # noqa: E402
 from aiter.ops.flydsl.kernels import buffer_ops as bo  # noqa: E402
-from aiter.ops.flydsl.kernels.act import silu_mul_batch  # noqa: E402
+from aiter.ops.flydsl.kernels.act import gate_up_act, situ_params  # noqa: E402
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import _pack_activation, quantize_rows  # noqa: E402
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.utils import _global_i32_at, _udiv, _umod  # noqa: E402
 from aiter.ops.flydsl.kernels.mxfp4_gemm_common import lds_typed_ptr, lds_vec_load  # noqa: E402
@@ -139,8 +139,9 @@ def _atomics_mi(datas, offs, col, out_i64, full, part):
 
 @functools.cache
 def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
-                           waves_per_eu=2, dyn_rows=True, xcd=True, ksplit=1):
+                           waves_per_eu=2, dyn_rows=True, xcd=True, ksplit=1, act="silu"):
     H, INTER = D_HIDDEN, D_INTER
+    assert act in ("silu", "situv2"), act
     assert INTER % 256 == 0 and H % TILE_K1 == 0 and H % TILE_N2 == 0
     NH = INTER // 128  # gemm1 column chunks of 128 = gemm2 K groups (one scale each)
     # ksplit > 1: the NH chunks of an expert block are split over ksplit CTAs; each
@@ -160,13 +161,14 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
     WS2_BYTES = NE * H * (INTER // 32)
     kname = (f"a8w4_fmoe_bm64_h{H}_i{INTER}_ne{NE}_k{TOPK}_bcm{b_cache_mod}"
              f"_w{waves_per_eu}{'_dyn' if dyn_rows else ''}{'_xcd' if xcd else ''}"
-             f"{f'_ks{ksplit}' if ksplit > 1 else ''}"
+             f"{f'_ks{ksplit}' if ksplit > 1 else ''}{'' if act == 'silu' else '_' + act}"
              f"{'_' + ABL.replace(',', '_') if ABL else ''}{f'_lp{LDS_PAD}' if LDS_PAD else ''}"
              f"{'_noat' if B.NO_ATOMIC else ''}{f'_dl{DELAY}' if DELAY else ''}"
              f"{'' if G1_SPREAD else '_g1up'}{'_probe' if PROBE else ''}")
 
     def _body(lds_ptr, arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2,
-              arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave, arg_dbg, c0):
+              arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave, arg_dbg, c0,
+              situ):
         tx = fx.Int32(gpu.thread_id("x"))
         lane_div_16 = lane // fx.Int32(16)
         lane_mod_16 = lane % fx.Int32(16)
@@ -389,8 +391,8 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                         rs = xs[mi * 4 + ii]
                         row = fx.Int32(mi * 16 + ii) + lane_div_16 * fx.Int32(4)
                         for ni in range_constexpr(N_REPEAT):
-                            y = silu_mul_batch([ag[ni][ii] * (rs * f_g[ni])],
-                                               [au[ni][ii] * (rs * f_u[ni])])[0]
+                            y = gate_up_act(act, [ag[ni][ii] * (rs * f_g[ni])],
+                                            [au[ni][ii] * (rs * f_u[ni])], situ)[0]
                             col = n_wave_base + fx.Int32(ni * 16) + lane_mod_16
                             stg[row * fx.Int32(TILE_N1) + col] = y.to(fx.BFloat16)
                 gpu.barrier()
@@ -629,7 +631,13 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
 
     @flyc.jit
     def _entry(arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg):
+               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg, f_b, f_br, f_lb, f_lbr,
+               f_lim):
+        if const_expr(act == "situv2"):
+            situ = situ_params(fx.Float32(f_b), fx.Float32(f_br), fx.Float32(f_lb),
+                               fx.Float32(f_lbr), fx.Float32(f_lim))
+        else:
+            situ = None
         lds_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         tx = fx.Int32(gpu.thread_id("x"))
         bx = fx.Int32(gpu.block_id("x"))
@@ -661,7 +669,8 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
                     fx.Int64(arith.ExtUIOp(T.i64, _raw(hw)).result)
                     + fx.Int64(arith.ExtUIOp(T.i64, _raw(xc_id)).result) * fx.Int64(1 << 32))
             _body(lds_ptr, arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2,
-                  arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave, arg_dbg, c0)
+                  arg_eids, arg_stids, arg_sw, arg_out, i32_M, m_block, lane, wave, arg_dbg, c0,
+                  situ)
             if const_expr(PROBE):
                 rocdl.s_waitcnt(vmcnt=0)
                 gpu.barrier()
@@ -672,18 +681,22 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
     def kernel(arg_x: fx.Int64, arg_xs: fx.Int64, arg_w1: fx.Int64, arg_ws1: fx.Int64,
                arg_exp1: fx.Int64, arg_w2: fx.Int64, arg_ws2: fx.Int64, arg_eids: fx.Int64,
                arg_cumsum: fx.Int64, arg_stids: fx.Int64, arg_sw: fx.Int64,
-               arg_out: fx.Int64, i32_M: fx.Int32, arg_dbg: fx.Int64):
+               arg_out: fx.Int64, i32_M: fx.Int32, arg_dbg: fx.Int64, f_b: fx.Float32,
+               f_br: fx.Float32, f_lb: fx.Float32, f_lbr: fx.Float32, f_lim: fx.Float32):
         _entry(arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg)
+               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg, f_b, f_br, f_lb, f_lbr,
+               f_lim)
 
     @flyc.jit
     def launch(arg_x: fx.Int64, arg_xs: fx.Int64, arg_w1: fx.Int64, arg_ws1: fx.Int64,
                arg_exp1: fx.Int64, arg_w2: fx.Int64, arg_ws2: fx.Int64, arg_eids: fx.Int64,
                arg_cumsum: fx.Int64, arg_stids: fx.Int64, arg_sw: fx.Int64,
-               arg_out: fx.Int64, i32_M: fx.Int32, arg_dbg: fx.Int64, i32_grid: fx.Int32,
-               stream: fx.Stream):
+               arg_out: fx.Int64, i32_M: fx.Int32, arg_dbg: fx.Int64, f_b: fx.Float32,
+               f_br: fx.Float32, f_lb: fx.Float32, f_lbr: fx.Float32, f_lim: fx.Float32,
+               i32_grid: fx.Int32, stream: fx.Stream):
         kernel(arg_x, arg_xs, arg_w1, arg_ws1, arg_exp1, arg_w2, arg_ws2, arg_eids,
-               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg,
+               arg_cumsum, arg_stids, arg_sw, arg_out, i32_M, arg_dbg, f_b, f_br, f_lb, f_lbr,
+               f_lim,
                value_attrs={"rocdl.waves_per_eu": waves_per_eu},
                ).launch(grid=(fx.Int64(i32_grid), 1, 1), block=(256, 1, 1), stream=stream)
 
@@ -692,7 +705,8 @@ def compile_a8w4_fmoe_bm64(*, D_HIDDEN, D_INTER, NE, TOPK=8, b_cache_mod=2,
 
 def a8w4_fmoe_bm64(x_fp8, x_scale, weights, sorted_ids, sorted_weights,
                    sorted_expert_ids, num_valid_ids, out, *, topk=8, b_cache_mod=1,
-                   waves_per_eu=2, dyn_rows=True, xcd=True, ksplit=1):
+                   waves_per_eu=2, dyn_rows=True, xcd=True, ksplit=1, act="silu",
+                   situ_beta=1.0, situ_linear_beta=1.0, swiglu_limit=float("inf")):
     """Fused stage1 + stage2. ``weights``: ``a8w4_prepare_weights(..., fast_dec=2)``
     (doc-mimo/kernels/test_flydsl_moe_a16wfp4.py); sorting block_m 64; ``out`` bf16
     [tokens, model_dim] zeroed (moe_sorting's moe_buf). ``ksplit``: CTAs per expert
@@ -703,7 +717,7 @@ def a8w4_fmoe_bm64(x_fp8, x_scale, weights, sorted_ids, sorted_weights,
     launch = compile_a8w4_fmoe_bm64(
         D_HIDDEN=model_dim, D_INTER=weights["w1"].shape[1] // 2, NE=E, TOPK=topk,
         b_cache_mod=b_cache_mod, waves_per_eu=waves_per_eu, dyn_rows=dyn_rows, xcd=xcd,
-        ksplit=ksplit)
+        ksplit=ksplit, act=act)
     _run_compiled(
         launch, x_fp8.data_ptr(), x_scale.data_ptr(), weights["w1"].data_ptr(),
         weights["w1_scale"].data_ptr(), weights["w1_exp"].data_ptr(),
@@ -711,6 +725,7 @@ def a8w4_fmoe_bm64(x_fp8, x_scale, weights, sorted_ids, sorted_weights,
         sorted_expert_ids.data_ptr(), num_valid_ids.data_ptr(), sorted_ids.data_ptr(),
         sorted_weights.data_ptr(), out.data_ptr(), int(tokens),
         _probe_buf(sorted_expert_ids.numel()).data_ptr() if PROBE else 0,
+        *G1.situ_args(situ_beta, situ_linear_beta, swiglu_limit),
         int(sorted_expert_ids.numel()) * ksplit, torch.cuda.current_stream())
     return out
 

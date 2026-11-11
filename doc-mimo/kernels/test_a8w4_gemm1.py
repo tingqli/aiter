@@ -37,10 +37,10 @@ from flydsl.expr.typing import Vector as Vec
 
 import aiter
 from aiter import QuantType, dtypes
-from aiter.fused_moe import fused_topk, moe_sorting
+from aiter.fused_moe import fused_topk, moe_sorting, situv2
 from aiter.jit.utils.chip_info import get_gfx
 from aiter.ops.flydsl.kernels import buffer_ops
-from aiter.ops.flydsl.kernels.act import silu_mul_batch
+from aiter.ops.flydsl.kernels.act import gate_up_act, situ_params
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_gemm1
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import (
     _pack_activation,
@@ -75,6 +75,10 @@ ROUTINGS = ["uniform", "hot"]
 # tokens' top-k (a few experts own a large share of the routed rows).
 HOT_EXPERT_DIV = 32
 HOT_EXPERT_BIAS = 2.0
+ACTS = ["silu", "situv2"]
+# SiTUv2 test params: kimi-k3 production betas; the clamp bound sits inside the
+# gate/up range of the random data (std ~64) so clamped and free values both occur.
+SITU = dict(situ_beta=4.0, situ_linear_beta=25.0, swiglu_limit=64.0)
 
 
 # =============================================================================
@@ -233,8 +237,12 @@ def compile_a8w4_gemm1(
     MAX_TILES=None,
     w_layout="std",
     fast_dec=False,
+    act="silu",
 ):
     """Build the A8W4 stage1 launcher.
+
+    ``act``: ``"silu"`` or ``"situv2"`` (as gemm1.py; SiTUv2 beta / linear_beta /
+    clamp limit are runtime f32 launch args, nothing baked).
 
     ``pipeline`` (default: ``rows <= 32``): prefetch tile kt+1 (A + W into VGPRs)
     while kt computes, double-buffered A-LDS, one barrier per tile. Wins in the
@@ -279,6 +287,7 @@ def compile_a8w4_gemm1(
     (TILE_N*TILE_K bytes of W + TILE_N*TILE_K/16 bytes of scales).
     """
     assert epilog in ("bf16", "q8", "q8s", "q8push", "q8pushs"), epilog
+    assert act in ("silu", "situv2"), act
     assert w_layout in ("std", "tile"), w_layout
     assert flush_tiny or not fast_dec, "fast_dec needs flush_tiny"
     TILE_W = w_layout == "tile"
@@ -350,6 +359,7 @@ def compile_a8w4_gemm1(
         f"_bcm{b_cache_mod}_xcd{xcd_swizzle}{wpe_tag}{ftz_tag}{dyn_tag}_{pipe_tag}"
         + ("_wt" if TILE_W else "")
         + (f"_fd{int(fast_dec)}" if fast_dec else "")
+        + ("" if act == "silu" else f"_{act}")
         + ("" if epilog == "bf16" else f"_{epilog}_k{TOPK}_r{AG_ROWS}_w{NPES}")
         + "".join(f"_{v}" for v in sorted(PUSH_VAR))
     )
@@ -369,6 +379,7 @@ def compile_a8w4_gemm1(
         arg_tbl,
         i32_rank,
         i32_epoch,
+        situ,
         tile,
         lane,
         wave,
@@ -703,7 +714,7 @@ def compile_a8w4_gemm1(
                         u = fx.Float32(fx.Vector(fx.memref_load_vec(acc_up[mi][ni]))[ii])
                         g = g * (rs * f_gate[ni])
                         u = u * (rs * f_up[ni])
-                        y = silu_mul_batch([g], [u])[0]
+                        y = gate_up_act(act, [g], [u], situ)[0]
                         out_idx = sorted_row * inter_i32 + out_cols[ni]
                         buffer_ops.buffer_store(
                             y.to(fx.BFloat16), _raw(out_rsrc), _raw(out_idx), mask=valid
@@ -729,7 +740,9 @@ def compile_a8w4_gemm1(
                     for ni in range_constexpr(N_REPEAT):
                         g = fx.Float32(fx.Vector(fx.memref_load_vec(acc_gate[mi][ni]))[ii])
                         u = fx.Float32(fx.Vector(fx.memref_load_vec(acc_up[mi][ni]))[ii])
-                        y = silu_mul_batch([g * (rs * f_gate[ni])], [u * (rs * f_up[ni])])[0]
+                        y = gate_up_act(
+                            act, [g * (rs * f_gate[ni])], [u * (rs * f_up[ni])], situ
+                        )[0]
                         col = n_wave_base + fx.Int32(ni * 16) + lane_mod_16
                         lds_bf16[row_in_tile * fx.Int32(TILE_N) + col] = y.to(fx.BFloat16)
             gpu.barrier()
@@ -907,7 +920,22 @@ def compile_a8w4_gemm1(
         arg_tbl,
         i32_rank,
         i32_epoch,
+        f32_situ_beta,
+        f32_situ_beta_rcp,
+        f32_situ_linbeta,
+        f32_situ_linbeta_rcp,
+        f32_swiglu_limit,
     ):
+        if const_expr(act == "situv2"):
+            situ = situ_params(
+                fx.Float32(f32_situ_beta),
+                fx.Float32(f32_situ_beta_rcp),
+                fx.Float32(f32_situ_linbeta),
+                fx.Float32(f32_situ_linbeta_rcp),
+                fx.Float32(f32_swiglu_limit),
+            )
+        else:
+            situ = None
         lds_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         tx = fx.Int32(gpu.thread_id("x"))
         bx = fx.Int32(gpu.block_id("x"))
@@ -952,6 +980,7 @@ def compile_a8w4_gemm1(
                 arg_tbl,
                 i32_rank,
                 i32_epoch,
+                situ,
                 tile,
                 lane,
                 wave,
@@ -972,6 +1001,11 @@ def compile_a8w4_gemm1(
         arg_tbl: fx.Int64,
         i32_rank: fx.Int32,
         i32_epoch: fx.Int32,
+        f32_situ_beta: fx.Float32,
+        f32_situ_beta_rcp: fx.Float32,
+        f32_situ_linbeta: fx.Float32,
+        f32_situ_linbeta_rcp: fx.Float32,
+        f32_swiglu_limit: fx.Float32,
     ):
         _entry(
             arg_x,
@@ -987,6 +1021,11 @@ def compile_a8w4_gemm1(
             arg_tbl,
             i32_rank,
             i32_epoch,
+            f32_situ_beta,
+            f32_situ_beta_rcp,
+            f32_situ_linbeta,
+            f32_situ_linbeta_rcp,
+            f32_swiglu_limit,
         )
 
     @flyc.jit
@@ -1004,6 +1043,11 @@ def compile_a8w4_gemm1(
         arg_tbl: fx.Int64,
         i32_rank: fx.Int32,
         i32_epoch: fx.Int32,
+        f32_situ_beta: fx.Float32,
+        f32_situ_beta_rcp: fx.Float32,
+        f32_situ_linbeta: fx.Float32,
+        f32_situ_linbeta_rcp: fx.Float32,
+        f32_swiglu_limit: fx.Float32,
         i32_grid: fx.Int32,
         stream: fx.Stream,
     ):
@@ -1021,6 +1065,11 @@ def compile_a8w4_gemm1(
             arg_tbl,
             i32_rank,
             i32_epoch,
+            f32_situ_beta,
+            f32_situ_beta_rcp,
+            f32_situ_linbeta,
+            f32_situ_linbeta_rcp,
+            f32_swiglu_limit,
             value_attrs=(
                 {"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None
             ),
@@ -1059,6 +1108,10 @@ def a8w4_gemm1(
     epoch=0,
     w_layout="std",
     fast_dec=False,
+    act="silu",
+    situ_beta=1.0,
+    situ_linear_beta=1.0,
+    swiglu_limit=float("inf"),
 ):
     """Host launcher. ``out`` is bf16 ``[sorted_expert_ids.numel()*tile_m, inter]``
     (``epilog="bf16"``), the local q8 buffer (``"q8"``), or ignored (``"q8push"``:
@@ -1091,6 +1144,7 @@ def a8w4_gemm1(
         MAX_TILES=sorted_expert_ids.numel() * (inter_dim // tile_n) if q8 else None,
         w_layout=w_layout,
         fast_dec=fast_dec,
+        act=act,
     )
     grid = sorted_expert_ids.numel() * (inter_dim // tile_n)
     _run_compiled(
@@ -1108,10 +1162,20 @@ def a8w4_gemm1(
         tbl.data_ptr() if tbl is not None else 0,
         int(rank),
         int(epoch),
+        *situ_args(situ_beta, situ_linear_beta, swiglu_limit),
         int(grid),
         torch.cuda.current_stream(),
     )
     return out
+
+
+def situ_args(situ_beta=1.0, situ_linear_beta=1.0, swiglu_limit=float("inf")):
+    """Runtime SiTUv2 launch args (beta, 1/beta, linear_beta, 1/linear_beta,
+    clamp limit; +inf = no clamp), as flydsl_a16w4_gemm1. Ignored by silu."""
+    beta, lbeta = float(situ_beta), float(situ_linear_beta)
+    if beta <= 0.0 or lbeta <= 0.0:
+        raise ValueError(f"situ_beta/situ_linear_beta must be > 0, got {beta}/{lbeta}")
+    return beta, 1.0 / beta, lbeta, 1.0 / lbeta, float(swiglu_limit)
 
 
 def retile_w1(w1_u8, w1_scale_u8, *, num_experts, inter_dim, model_dim, tile_n, tile_k):
@@ -1183,7 +1247,8 @@ def prep_w1_fast(w1_u8, w1_scale_u8, w1_exp, fast_dec):
 
 
 def run_torch(
-    x_fp8, x_scale, w1_qt, w1_scale, sorted_ids, sorted_expert_ids, num_valid_ids, tile_m
+    x_fp8, x_scale, w1_qt, w1_scale, sorted_ids, sorted_expert_ids, num_valid_ids, tile_m,
+    act="silu", situ=None,
 ):
     """fp32 reference in the kernel's sorted output layout.
 
@@ -1212,8 +1277,22 @@ def run_torch(
         w = fp4_utils.mxfp4_to_f32(w1_qt[e]).view(n_out, model_dim // 32, 32)
         w = (w * w_scale[e]).view(n_out, model_dim)
         gate, up = (a[token[rows]] @ w.t()).split(inter_dim, dim=-1)
-        ref[rows] = F.silu(gate) * up
+        ref[rows] = act_ref(gate, up, act, situ)
     return ref.to(dtypes.bf16), mask
+
+
+def act_ref(gate, up, act="silu", situ=None):
+    """fp32 act(gate) * up; SiTUv2 with the kernel's clamp (gate <= L, |up| <= L)."""
+    if act == "silu":
+        return F.silu(gate) * up
+    situ = situ or {}
+    lim = float(situ.get("swiglu_limit", float("inf")))
+    return situv2(
+        gate.clamp(max=lim),
+        up.clamp(min=-lim, max=lim),
+        beta=float(situ.get("situ_beta", 1.0)),
+        linear_beta=float(situ.get("situ_linear_beta", 1.0)),
+    )
 
 
 def _cos_diff(x, y):
@@ -1237,8 +1316,10 @@ def bench_a8w4_gemm1(
     pipeline=None,
     waves_per_eu=None,
     dyn_m=False,
+    act="silu",
 ):
     tile_k = 256
+    situ = SITU if act == "situv2" else {}
     device = "cuda"
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
@@ -1283,6 +1364,8 @@ def bench_a8w4_gemm1(
         sorted_expert_ids,
         num_valid_ids,
         tile_m,
+        act,
+        situ,
     )
 
     def _out():
@@ -1322,6 +1405,8 @@ def bench_a8w4_gemm1(
             pipeline=pipeline,
             waves_per_eu=waves_per_eu,
             dyn_m=dyn_m,
+            act=act,
+            **situ,
         ),
         # production a16w4 port built for fp8r (baseline)
         "port": lambda: flydsl_a16w4_gemm1(
@@ -1346,6 +1431,8 @@ def bench_a8w4_gemm1(
             a_scale=x_scale,
             b_exp=w1_exp,
             flush_tiny=flush_tiny,
+            act=act,
+            **situ,
         ),
         # standalone kernel on the retiled (per-WG K-tile contiguous) W layout
         "a8w4_tile": lambda: a8w4_gemm1(
@@ -1368,6 +1455,8 @@ def bench_a8w4_gemm1(
             pipeline=pipeline,
             waves_per_eu=waves_per_eu,
             dyn_m=dyn_m,
+            act=act,
+            **situ,
             w_layout="tile",
         ),
         # fast decode 1 (nibble-reordered, no -0 W), production std layout
@@ -1391,6 +1480,8 @@ def bench_a8w4_gemm1(
             pipeline=pipeline,
             waves_per_eu=waves_per_eu,
             dyn_m=dyn_m,
+            act=act,
+            **situ,
             fast_dec=1,
         ),
         # + per-group delta precomputed in the scale bytes, flushed groups zeroed
@@ -1414,6 +1505,8 @@ def bench_a8w4_gemm1(
             pipeline=pipeline,
             waves_per_eu=waves_per_eu,
             dyn_m=dyn_m,
+            act=act,
+            **situ,
             fast_dec=2,
         ),
     }
@@ -1468,10 +1561,12 @@ def bench_a8w4_gemm1(
 # per-block runtime choice of 32 (pipelined) or 64 (single-slot) rows.
 @pytest.mark.parametrize("tile_m,dyn_m", [(32, False), (64, False), (64, True)])
 @pytest.mark.parametrize("routing", ROUTINGS)
+@pytest.mark.parametrize("act", ACTS)
 def test_a8w4_gemm1_silu(
-    token, model_dim, inter_dim, expert, topk, tile_m, dyn_m, routing
+    token, model_dim, inter_dim, expert, topk, tile_m, dyn_m, routing, act
 ):
-    """Mimo v2.6 stage1 shape: standalone kernel and port vs fp32 reference."""
+    """Mimo v2.6 stage1 shape: standalone kernel and port vs fp32 reference
+    (silu, and situv2 with clamp: the port is gemm1.py's act="situv2")."""
     ret = bench_a8w4_gemm1(
         token,
         model_dim,
@@ -1481,6 +1576,7 @@ def test_a8w4_gemm1_silu(
         routing=routing,
         tile_m=tile_m,
         dyn_m=dyn_m,
+        act=act,
     )
     for name in ("a8w4_gemm1", "port", "a8w4_tile", "a8w4_fd1", "a8w4_fd2"):
         assert ret[f"{name} err"] <= TOL_ERR_RATIO, f"{name} mismatch {ret}"
@@ -1528,11 +1624,15 @@ def main():
         default=ROUTINGS,
         help="uniform: random top-k; hot: a few hot experts own most routed rows",
     )
+    parser.add_argument(
+        "-a", "--act", type=str, nargs="*", choices=ACTS, default=["silu"],
+        help="gate/up activation (situv2 uses SITU params)",
+    )
     args = parser.parse_args()
 
     df = []
-    for (model_dim, inter_dim, expert, topk), token, routing, tile in (
-        itertools.product(args.shape, args.token, args.routing, args.tile)
+    for (model_dim, inter_dim, expert, topk), token, routing, tile, act in (
+        itertools.product(args.shape, args.token, args.routing, args.tile, args.act)
     ):
         tile_m, tile_n = tile[:2]
         df.append(
@@ -1546,6 +1646,7 @@ def main():
                 tile_m=tile_m,
                 tile_n=tile_n,
                 dyn_m=bool(tile[2]) if len(tile) > 2 else False,
+                act=act,
             )
         )
     df = pd.DataFrame(df)
