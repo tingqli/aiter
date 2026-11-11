@@ -50,7 +50,7 @@ import test_flydsl_moe_a16wfp4 as M  # noqa: E402
 
 from aiter import QuantType, dtypes, get_torch_quant  # noqa: E402
 from aiter.fused_moe import fused_topk, moe_sorting  # noqa: E402
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows  # noqa: E402
+from a8w4_row_quant import quantize_rows  # noqa: E402
 from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4  # noqa: E402
 
 DEFAULT_CSV = os.path.join(HERE, "configs", "a8w4_moe_tuned.csv")

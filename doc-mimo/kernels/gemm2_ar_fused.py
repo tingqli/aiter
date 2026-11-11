@@ -618,7 +618,7 @@ def make_case(tok, rank, a_group=0, E=256, D=4096, I=256, K=8, BM=32):
     if a_group:
         a, s = quantize_groups(inter, a_group)
     else:
-        from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
+        from a8w4_row_quant import quantize_rows
 
         a, s = quantize_rows(inter, nv)
     out = torch.zeros((tok, D), dtype=dtypes.bf16, device="cuda")

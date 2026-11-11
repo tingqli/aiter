@@ -20,6 +20,7 @@ token); global expert ids are remapped to the 32 local ids by ``moe_sorting``'s
 """
 
 import os
+import sys
 from collections import defaultdict
 
 import torch
@@ -233,7 +234,8 @@ def ref_moe(x, topk_weights, topk_ids, W, a8w4=False, rank=RANK):
     Exact mxfp4 weights. ``a8w4``: x / the SiLU output are fp8-quantized the way
     the A8W4 kernels do (x per token row, intermediate per (row, 128 cols)), so the
     remaining differences are accumulation order and bf16 output rounding."""
-    from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from a8w4_row_quant import quantize_rows
 
     tokens, model_dim = x.shape
     E, n2, _ = W["w1q"].shape

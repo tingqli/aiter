@@ -23,6 +23,7 @@ import argparse
 import functools
 import itertools
 import os
+import sys
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -45,7 +46,6 @@ from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_gemm1
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import (
     _pack_activation,
     channel_exponents,
-    quantize_rows,
 )
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.utils import (
     _buffer_i32_scalar_read,
@@ -67,6 +67,9 @@ from aiter.ops.flydsl.kernels.tensor_shim import _to_raw as _raw
 from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 from aiter.test_common import benchmark, checkAllclose, run_perftest
 from aiter.utility import fp4_utils
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from a8w4_row_quant import quantize_rows  # noqa: E402
 
 SUPPORTED_GFX = ["gfx942"]  # FP8-FNUZ MFMA path
 TOL_ERR_RATIO = 0.05
@@ -232,9 +235,7 @@ def compile_a8w4_gemm1(
     dyn_m=False,
     epilog="bf16",
     TOPK=None,
-    AG_ROWS=None,
     NPES=1,
-    MAX_TILES=None,
     w_layout="std",
     fast_dec=False,
     act="silu",
@@ -259,25 +260,30 @@ def compile_a8w4_gemm1(
     [tokens], ``w`` mxfp4 [E, 2*inter, K/2] (standard preshuffle), ``w_scale`` e8m0
     (shuffled), ``w_exp`` int32 [E, 2*inter] (``channel_exponents``),
     ``sorted_expert_ids``, ``num_valid_ids``, ``sorted_ids``, ``out`` bf16
-    [sorted_size, inter], then ``tokens``, ``tbl``, ``rank``, ``epoch``, ``grid``
-    and the stream.
+    [sorted_size, inter], then ``tokens``, ``tbl``, ``rank``, ``epoch``, ``rows``,
+    the five SiTUv2 scalars (``situ_args``), ``grid`` and the stream.
+
+    Nothing batch-size dependent is baked in: ``rows`` (rows of the q8 output
+    plane, below) and the flag-table stride (= ``grid``, one flag per tile) are
+    launch args, so one binary serves every token count.
 
     ``epilog`` (experiment for the N-split + all-gather TP idea, moe-new-tp.md):
       * ``"bf16"`` (default): bf16 ``[sorted_size, inter]`` by sorted position.
       * ``"q8"``: SiLU output staged as bf16 in LDS, quantized to fp8 FNUZ with one
         f32 scale per (row, TILE_N columns), written UNSORTED (row = token*TOPK +
-        slot, ``AG_ROWS`` = tokens*TOPK rows) into ``out``: ``[AG_ROWS, inter]`` fp8
-        then ``[AG_ROWS, inter/TILE_N]`` f32 scales.
+        slot, ``rows`` = tokens*TOPK) into ``out``: ``[rows, inter]`` fp8 then
+        ``[rows, inter/TILE_N]`` f32 scales.
       * ``"q8push"``: same tile, pushed (sc0|sc1) into plane ``rank`` of every TP
         peer's symmetric buffer (``tbl``: peer bases), double-buffered by epoch
         parity; then flag ``[rank][tile] = epoch`` on every peer. Slot layout:
-        ``[NPES][AG_ROWS][inter]`` fp8, ``[NPES][AG_ROWS][inter/TILE_N]`` f32;
-        flags ``[NPES][MAX_TILES]`` i32 after the two slots.
-      * ``"q8pushs"``: as q8push but rows by SORTED position (``AG_ROWS`` =
+        ``[NPES][rows][inter]`` fp8, ``[NPES][rows][inter/TILE_N]`` f32 (slot =
+        that rounded up to 256 B); flags ``[NPES][grid]`` i32 after the two slots.
+        The layout is a contract with the peers: keep ``rows`` fixed per buffer.
+      * ``"q8pushs"``: as q8push but rows by SORTED position (``rows`` =
         sorted_size; the layout gemm2 already reads A in; padding rows not sent)
-        and scales ``[NPES][inter/TILE_N][AG_ROWS]`` f32, staged in LDS and pushed
+        and scales ``[NPES][inter/TILE_N][rows]`` f32, staged in LDS and pushed
         as one contiguous BM*4 B run per tile instead of 4 B scattered stores.
-      * ``"q8s"``: as q8 (local) but rows by SORTED position (``AG_ROWS`` =
+      * ``"q8s"``: as q8 (local) but rows by SORTED position (``rows`` =
         sorted_size): ``out`` = ``[sorted_size, inter]`` fp8 then
         ``[sorted_size, inter/TILE_N]`` f32, i.e. gemm2's A + per-128-K-group scale
         (``a8w4_gemm2(..., a_group=128)``); replaces the separate row-quant kernel.
@@ -323,13 +329,10 @@ def compile_a8w4_gemm1(
     LDS_BYTES = max(r * TILE_K * (2 if _pipe(r) else 1) for r in ROW_VARIANTS)
     if epilog != "bf16":
         LDS_BYTES = max(LDS_BYTES, BM * TILE_N * 2 + BM * 4)  # bf16 tile + scales
-        assert TOPK and AG_ROWS, "q8 epilogues need TOPK and AG_ROWS"
+        assert TOPK, "q8 epilogues need TOPK"
     Q_TPR = TILE_N // 16  # threads per row in the quant pass (16 cols each)
     Q_RPP = 256 // Q_TPR  # rows per pass
     assert all(r % Q_RPP == 0 for r in ROW_VARIANTS) or epilog == "bf16"
-    AG_DATA = NPES * (AG_ROWS or 0) * INTER
-    AG_SLOT = -(-(AG_DATA + NPES * (AG_ROWS or 0) * NUM_N_BLOCKS * 4) // 256) * 256
-    AG_FLAG_OFF = 2 * AG_SLOT
     # ablation knob (experiment only): comma list of noscale, nopub, cm0, cm16,
     # one, selfonly. A tuple, not a set: FlyDSL keys its JIT cache on scalar/tuple
     # closure values only, a set would silently reuse another variant's binary.
@@ -360,7 +363,7 @@ def compile_a8w4_gemm1(
         + ("_wt" if TILE_W else "")
         + (f"_fd{int(fast_dec)}" if fast_dec else "")
         + ("" if act == "silu" else f"_{act}")
-        + ("" if epilog == "bf16" else f"_{epilog}_k{TOPK}_r{AG_ROWS}_w{NPES}")
+        + ("" if epilog == "bf16" else f"_{epilog}_k{TOPK}_w{NPES}")
         + "".join(f"_{v}" for v in sorted(PUSH_VAR))
     )
 
@@ -379,6 +382,8 @@ def compile_a8w4_gemm1(
         arg_tbl,
         i32_rank,
         i32_epoch,
+        i32_rows,
+        i32_tiles,
         situ,
         tile,
         lane,
@@ -747,9 +752,19 @@ def compile_a8w4_gemm1(
                         lds_bf16[row_in_tile * fx.Int32(TILE_N) + col] = y.to(fx.BFloat16)
             gpu.barrier()
 
+            # q8 plane layout from the runtime row count (i32 dword indices as
+            # before; byte extents in i64): data [NPES][rows][INTER] fp8, then the
+            # f32 scales; a push slot is that rounded up to 256 B, two slots
+            # (epoch parity), then the flags.
+            rows_i64 = fx.Int64(i32_rows)
+            data_b = rows_i64 * fx.Int64(NPES * INTER)
+            slot_b = (
+                data_b + rows_i64 * fx.Int64(NPES * NUM_N_BLOCKS * 4) + fx.Int64(255)
+            ) & fx.Int64(-256)
+            s_base = i32_rows * fx.Int32(NPES * INTER // 4)  # dword index of scales
             if const_expr(PUSH):
                 tbl = global_typed_ptr(arg_tbl, T.i64, align=8)
-                parity = fx.Int64(i32_epoch & fx.Int32(1)) * fx.Int64(AG_SLOT)
+                parity = fx.Int64(i32_epoch & fx.Int32(1)) * slot_b
                 # store i of this WG goes to rank (rank + tile + i): spread over links
                 dsts = [
                     buffer_ops.create_buffer_resource_from_addr(
@@ -765,11 +780,11 @@ def compile_a8w4_gemm1(
                         ),
                         # bounded: masked lanes use offset 0x7FFFFFFF and must be
                         # dropped by the range check, not written at base + 2 GB
-                        num_records_bytes=AG_SLOT,
+                        num_records_bytes=_raw(slot_b),
                     )
                     for i in range(1 if "one" in PUSH_VAR else NPES)
                 ]
-                plane = i32_rank * fx.Int32(AG_ROWS)
+                plane = i32_rank * i32_rows
                 cm = 17  # sc0|sc1 write-through (system coherent), as two-shot light
                 if const_expr("cm0" in PUSH_VAR):
                     cm = 0
@@ -779,7 +794,9 @@ def compile_a8w4_gemm1(
                 dsts = [
                     buffer_ops.create_buffer_resource_from_addr(
                         _raw(fx.Int64(arg_out)),
-                        num_records_bytes=AG_ROWS * (INTER + NUM_N_BLOCKS * 4),
+                        num_records_bytes=_raw(
+                            rows_i64 * fx.Int64(INTER + NUM_N_BLOCKS * 4)
+                        ),
                     )
                 ]
                 plane = fx.Int32(0)
@@ -824,9 +841,7 @@ def compile_a8w4_gemm1(
                     fx.Int32,
                 )
                 d_off = (dest_row * fx.Int32(INTER) + by_n + sub * fx.Int32(16)) // fx.Int32(4)
-                s_off = fx.Int32(AG_DATA // 4 if PUSH else AG_ROWS * INTER // 4) + (
-                    dest_row * fx.Int32(NUM_N_BLOCKS) + n_block
-                )
+                s_off = s_base + (dest_row * fx.Int32(NUM_N_BLOCKS) + n_block)
                 s_valid = (sub == fx.Int32(0)).select(token, i32_ntok) < i32_ntok
                 if const_expr(SCALE_RUN):
                     # all TPR lanes of the row hold the same s: identical LDS writes
@@ -849,8 +864,8 @@ def compile_a8w4_gemm1(
                     fx.Float32,
                     align=16,
                 )
-                s_run = fx.Int32(AG_DATA // 4) + (
-                    (i32_rank * fx.Int32(NUM_N_BLOCKS) + n_block) * fx.Int32(AG_ROWS)
+                s_run = s_base + (
+                    (i32_rank * fx.Int32(NUM_N_BLOCKS) + n_block) * i32_rows
                     + bx_m
                     + tx * fx.Int32(4)
                 )
@@ -862,7 +877,15 @@ def compile_a8w4_gemm1(
             if const_expr(PUSH and "nopub" not in PUSH_VAR):
                 rocdl.s_waitcnt(vmcnt=0)
                 gpu.barrier()
-                _publish(arg_tbl, i32_rank, i32_epoch, tx, m_block * fx.Int32(NUM_N_BLOCKS) + n_block)
+                _publish(
+                    arg_tbl,
+                    i32_rank,
+                    i32_epoch,
+                    tx,
+                    m_block * fx.Int32(NUM_N_BLOCKS) + n_block,
+                    slot_b * fx.Int64(2),
+                    i32_tiles,
+                )
 
         # ---- row-variant dispatch ------------------------------------------------
         if const_expr(dyn_m):
@@ -885,7 +908,7 @@ def compile_a8w4_gemm1(
             run_rows(BM)
 
     @flyc.jit
-    def _publish(arg_tbl, i32_rank, i32_epoch, tx, flag_idx):
+    def _publish(arg_tbl, i32_rank, i32_epoch, tx, flag_idx, flag_off, i32_tiles):
         """Lane t < NPES sets flag[rank][tile] = epoch on rank (rank + t)."""
         if tx < fx.Int32(NPES):
             tbl = global_typed_ptr(arg_tbl, T.i64, align=8)
@@ -893,8 +916,8 @@ def compile_a8w4_gemm1(
             llvm.AtomicRMWOp(
                 llvm.AtomicBinOp.xchg,
                 _gep1(
-                    _global_base_ptr1(fx.Int64(tbl[peer]) + fx.Int64(AG_FLAG_OFF)),
-                    (i32_rank * fx.Int32(MAX_TILES) + flag_idx) * fx.Int32(4),
+                    _global_base_ptr1(fx.Int64(tbl[peer]) + fx.Int64(flag_off)),
+                    (i32_rank * i32_tiles + flag_idx) * fx.Int32(4),
                 ),
                 _raw(i32_epoch),
                 llvm.AtomicOrdering.monotonic,
@@ -920,6 +943,8 @@ def compile_a8w4_gemm1(
         arg_tbl,
         i32_rank,
         i32_epoch,
+        i32_rows,
+        i32_tiles,
         f32_situ_beta,
         f32_situ_beta_rcp,
         f32_situ_linbeta,
@@ -980,6 +1005,8 @@ def compile_a8w4_gemm1(
                 arg_tbl,
                 i32_rank,
                 i32_epoch,
+                i32_rows,
+                i32_tiles,
                 situ,
                 tile,
                 lane,
@@ -1001,6 +1028,8 @@ def compile_a8w4_gemm1(
         arg_tbl: fx.Int64,
         i32_rank: fx.Int32,
         i32_epoch: fx.Int32,
+        i32_rows: fx.Int32,
+        i32_tiles: fx.Int32,
         f32_situ_beta: fx.Float32,
         f32_situ_beta_rcp: fx.Float32,
         f32_situ_linbeta: fx.Float32,
@@ -1021,6 +1050,8 @@ def compile_a8w4_gemm1(
             arg_tbl,
             i32_rank,
             i32_epoch,
+            i32_rows,
+            i32_tiles,
             f32_situ_beta,
             f32_situ_beta_rcp,
             f32_situ_linbeta,
@@ -1043,6 +1074,7 @@ def compile_a8w4_gemm1(
         arg_tbl: fx.Int64,
         i32_rank: fx.Int32,
         i32_epoch: fx.Int32,
+        i32_rows: fx.Int32,
         f32_situ_beta: fx.Float32,
         f32_situ_beta_rcp: fx.Float32,
         f32_situ_linbeta: fx.Float32,
@@ -1065,6 +1097,8 @@ def compile_a8w4_gemm1(
             arg_tbl,
             i32_rank,
             i32_epoch,
+            i32_rows,
+            i32_grid,  # flag-table stride: one flag per launched tile
             f32_situ_beta,
             f32_situ_beta_rcp,
             f32_situ_linbeta,
@@ -1135,18 +1169,21 @@ def a8w4_gemm1(
         dyn_m=dyn_m,
         epilog=epilog,
         TOPK=topk if q8 else None,
-        AG_ROWS=(
-            sorted_expert_ids.numel() * tile_m
-            if epilog in ("q8s", "q8pushs")
-            else tokens * topk
-        ) if q8 else None,
         NPES=npes,
-        MAX_TILES=sorted_expert_ids.numel() * (inter_dim // tile_n) if q8 else None,
         w_layout=w_layout,
         fast_dec=fast_dec,
         act=act,
     )
     grid = sorted_expert_ids.numel() * (inter_dim // tile_n)
+    # q8 epilogues: rows of the [rows, inter] fp8 plane (its scales follow it). A
+    # launch arg, not a compile constant: it changes with every batch size.
+    rows = 0
+    if q8:
+        rows = (
+            sorted_expert_ids.numel() * tile_m
+            if epilog in ("q8s", "q8pushs")
+            else tokens * topk
+        )
     _run_compiled(
         launch,
         x_fp8.data_ptr(),
@@ -1162,6 +1199,7 @@ def a8w4_gemm1(
         tbl.data_ptr() if tbl is not None else 0,
         int(rank),
         int(epoch),
+        int(rows),
         *situ_args(situ_beta, situ_linear_beta, swiglu_limit),
         int(grid),
         torch.cuda.current_stream(),

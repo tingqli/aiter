@@ -41,7 +41,6 @@ from aiter import QuantType, dtypes
 from aiter.fused_moe import fused_topk, moe_sorting
 from aiter.jit.utils.chip_info import get_gfx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
 from aiter.ops.flydsl.kernels.mxfp4_gemm_common import (
     _gep1,
     _global_base_ptr1,
@@ -53,6 +52,7 @@ from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 from aiter.test_common import benchmark, checkAllclose, run_perftest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from a8w4_row_quant import quantize_rows  # noqa: E402
 from test_a8w4_gemm2 import (  # noqa: E402
     HOT_EXPERT_BIAS,
     HOT_EXPERT_DIV,

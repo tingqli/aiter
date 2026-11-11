@@ -12,7 +12,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ep8_common as C  # noqa: E402
 import ep8_prep as PR  # noqa: E402
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows  # noqa: E402
+from a8w4_row_quant import quantize_rows  # noqa: E402
 
 
 def ref_sched(counts, bm, CB=64, NX=8):

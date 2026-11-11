@@ -42,7 +42,7 @@ sids_t = torch.tensor(sids, dtype=torch.int32, device="cuda")
 seids_t = torch.tensor(seids, dtype=torch.int32, device="cuda")
 nv = torch.tensor([len(sids), tok], dtype=torch.int32, device="cuda")
 if adt == "fp8":
-    from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
+    from a8w4_row_quant import quantize_rows
     x8, xs = quantize_rows(x)
     xf = x8.float() * xs.view(-1, 1)
 else:

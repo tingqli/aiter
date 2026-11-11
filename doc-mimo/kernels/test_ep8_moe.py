@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ep8_common as C  # noqa: E402
 import ep8_moe as EP  # noqa: E402
 import test_a8w4_gemm1 as G1  # noqa: E402
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows  # noqa: E402
+from a8w4_row_quant import quantize_rows  # noqa: E402
 from aiter.utility import fp4_utils  # noqa: E402
 
 _W = {}

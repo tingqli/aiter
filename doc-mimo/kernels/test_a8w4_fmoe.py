@@ -60,7 +60,6 @@ from aiter.ops.flydsl.kernels.act import silu_mul_batch
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import (
     _pack_activation,
     channel_exponents,
-    quantize_rows,
 )
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.utils import (
     _buffer_i32_scalar_read,
@@ -82,6 +81,9 @@ from aiter.ops.flydsl.kernels.tensor_shim import _to_raw as _raw
 from aiter.ops.flydsl.moe_common import GateMode
 from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 from aiter.test_common import benchmark, checkAllclose, run_perftest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from a8w4_row_quant import quantize_rows  # noqa: E402
 
 SUPPORTED_GFX = ["gfx942"]  # FP8-FNUZ MFMA + global bf16x2 atomics
 ROUTINGS = ["uniform", "hot"]

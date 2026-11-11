@@ -6,7 +6,8 @@
 - 2-kernel 端到端流程，以及单 kernel 融合 MoE；
 - TP8 下 gemm2 + all-reduce 的卡间通讯实验，包括跨卡 atomic、跨卡 store/load 带宽，以及自研 two-shot all-reduce；
 - EP8（专家并行，每卡 32 个本地专家、inter 2048）专用的 a8w4 / a16w4 kernel（第 8 节）；
-- MiMo-V2.6 Flash / Pro TP8 的 FP8 blockscale fused MoE，在 MI350X（gfx950）上（第 9 节）。
+- MiMo-V2.6 Flash / Pro TP8 的 FP8 blockscale fused MoE，在 MI350X（gfx950）上（第 9 节）；
+- tuned MoE（按 batch 在 2-kernel / 单 kernel 之间选择）：SiTUv2 激活、支持的 model_dim / inter_dim 范围、去掉按 token 数重编译（第 10 节）。
 
 这些改动有实测收益，但依赖测试文件里的私有 kernel、HIP IPC 和特定 shape，难以直接 upstream，所以集中存档在这里。
 
@@ -23,6 +24,11 @@ doc-mimo/
     test_a8w4_gemm2.py                  # gemm2（down + 路由 atomic scatter）standalone kernel + 正确性/性能
     twoshot_allreduce.py               # TP8：gemm2 + RCCL / two-shot all-reduce（含 HIP IPC symmetric buffer）
     test_a8w4_fmoe.py                   # gemm1+gemm2 单 kernel 融合 MoE（对比 2-kernel 与 fused_moe）
+    test_a8w4_fmoe_bm64.py / test_a8w4_fmoe_bm64q.py  # BM=64 单 kernel MoE（tuned 表里的 1k）/ 其 persistent 工作队列版（1kq）
+    a8w4_moe_tune.py                    # tuned MoE：按 batch 选 2k / 1k / 1kq；tune / verify / compare-act（第 10 节）
+    configs/a8w4_moe_tuned.csv          # 4096/256、4096/512 的调优表
+    a8w4_row_quant.py                   # 按行 fp8 量化（aiter quantize_rows 的副本，行数改为运行时参数）
+    gemm1_ag_tp.py                      # TP8：gemm1 q8 epilogue 直接 push 到各卡（q8push / q8pushs）
     test_flydsl_moe_a16wfp4.py          # 加了 a8w4 2-kernel e2e 对比的 e2e 测试（完整文件）
     test_flydsl_moe_a16wfp4.e2e.patch   # 同上，相对基线的 diff
     ep8_common.py                       # EP8：shape、权重/路由生成、参考实现、下限、冷 cache 计时
@@ -59,6 +65,12 @@ python doc-mimo/kernels/test_a8w4_fmoe.py -t 128 512
 AITER_CONFIG_FMOE=$PWD/mimo_v2.6_flash_a8w4_tuned_fmoe.csv \
   pytest -s doc-mimo/kernels/test_flydsl_moe_a16wfp4.py::test_flydsl_a16wfp4_silu_e2e
 
+# tuned MoE（第 10 节）
+python doc-mimo/kernels/a8w4_moe_tune.py tune --shape 4096,256,256,8 --csv doc-mimo/kernels/configs/a8w4_moe_tuned.csv
+python doc-mimo/kernels/a8w4_moe_tune.py verify --shape 4096,256,256,8
+python doc-mimo/kernels/a8w4_moe_tune.py compare-act --shape 4096,256,256,8 --situ 4,25,64
+python doc-mimo/kernels/test_a8w4_gemm1.py -t 512 --act silu situv2
+
 # EP8（单卡即一个 rank）
 python doc-mimo/kernels/test_ep8_prep.py -t 1 16 1024 16384
 python doc-mimo/kernels/test_ep8_moe.py g1 -t 16 4096 --adt fp8 bf16 --bm 128 --rowv 32,64,128 --nw 8 --sch 3 --tr 1
@@ -73,6 +85,7 @@ torchrun --nproc_per_node=8 doc-mimo/kernels/twoshot_allreduce.py -t 128 512 204
 torchrun --nproc_per_node=8 doc-mimo/comm/peer_atomic_probe.py
 torchrun --nproc_per_node=8 doc-mimo/comm/peer_store_probe.py
 torchrun --nproc_per_node=8 doc-mimo/comm/twoshot_bench.py 128 256 512 1024 2048
+torchrun --nproc_per_node=8 doc-mimo/kernels/gemm1_ag_tp.py 128 512
 ```
 
 ---
@@ -647,6 +660,147 @@ store + reduce 快：那里 atomic 约 1.5 TB/s，是 store 的 1/3，而且 A8W
 - 用 atomic 直接写 out 省掉 sum 也不行：MI350X 上 atomic 和 HBM 读流基本不重叠，atomic 花多少时间就加多少。
 - 还有空间的是 2048 / 4096（参考 / 下限 1.25–1.59 倍），要在 bs_moe 上做：这些 T 下 gemm1 读 w1 只有 3.2–4.1 TB/s。
 - 经验：先算下限再决定写不写新 kernel。这次是写完 bs_small 才确认 512 / 1024 的参考已在下限的 1.2 倍左右。
+
+---
+
+## 10. tuned MoE（`a8w4_moe_tune.py`）：SiTUv2、shape 范围、按 token 数重编译
+
+`a8w4_moe_tune.py` 按 batch 大小从 `configs/a8w4_moe_tuned.csv` 选 kernel：
+
+- **2k**：sort → x 量化 → gemm1（q8s epilogue）→ gemm2（base 或 nt4）；
+- **1k**：`test_a8w4_fmoe_bm64`，BM=64 单 kernel，按 inter 列切成 ksplit 个 CTA；
+- **1kq**：`test_a8w4_fmoe_bm64q`，persistent 工作队列版（只支持 inter 256）。
+
+本节记录在这条路径上做的三件事。硬件 MI325X，测试环境见 10.4。
+
+### 10.1 SiTUv2 激活
+
+做法仿照生产的 `moe_2stage_a16wmix/gemm1.py`：
+
+- `act="silu" | "situv2"` 是编译期参数，kernel 名加 `_situv2`（silu 的 kernel 名不变）。
+- beta、1/beta、linear_beta、1/linear_beta、clamp 上限（`swiglu_limit`，+inf 表示不 clamp）是 5 个运行时 f32
+  launch 参数，默认值与 `flydsl_a16w4_gemm1` 相同（1 / 1 / +inf），kernel 里用 `situ_params` + `gate_up_act`。
+  silu 也带这 5 个参数（不使用），实测 silu 耗时不变。
+- 覆盖 gemm1 的全部 epilogue（bf16 / q8 / q8s / q8push / q8pushs）、`fmoe_bm64`、`fmoe_bm64q`；gemm2 没有激活，不变。
+  `run_config` / `tuned_moe` 接受 `act`、`situ`。
+- 正确性：
+  - `test_a8w4_gemm1.py` 的 pytest 增加 `act` 维度，12 个 case 全过；situv2 与生产 port（gemm1.py
+    `act="situv2"`）逐位一致，也与带 clamp 的 fp32 参考一致（`SITU`：beta 4、linear_beta 25、limit 64）。
+  - 端到端（`compare-act`）对 torch 参考的 cos 为 3.6e-3（silu 为 1.0e-3），2k / 1k / 1kq 三种 kernel 结果一致。
+
+`compare-act`，4096/256/256/8，每个 token 数用 CSV 里的 tuned 配置，5 次取中位数，单位 us：
+
+| tokens | tuned 配置 | silu | situv2 | situv2/silu |
+|---:|---|---:|---:|---:|
+| 1 | 2k bm32 g1bcm1 g2base | 42.7 | 43.4 | 1.016 |
+| 2 | 2k bm64 g1bcm2 g2base | 44.9 | 45.4 | 1.012 |
+| 4 | 2k bm32 g1bcm2 g2nt4 | 45.5 | 45.8 | 1.007 |
+| 8 | 2k bm32 g1bcm2 g2nt4 | 51.7 | 52.6 | 1.018 |
+| 16 | 2k bm32 g1bcm1 g2nt4 | 70.4 | 71.5 | 1.015 |
+| 32 | 2k bm64 g1bcm1 g2nt4 | 100.1 | 101.7 | 1.015 |
+| 64 | 2k bm32 g1bcm1 g2nt4 | 120.3 | 122.2 | 1.016 |
+| 128 | 2k bm32 g1bcm1 g2base | 137.6 | 144.0 | 1.047 |
+| 256 | 2k bm32 g1bcm1 g2base | 146.0 | 149.4 | 1.023 |
+| 512 | 2k bm32 g1bcm1 g2nt4 | 171.5 | 171.6 | 1.000 |
+| 1024 | 1k bm64 bcm2 w2 ks1 | 216.3 | 222.6 | 1.029 |
+| 2048 | 2k bm32 g1bcm1 g2nt4 | 332.2 | 334.8 | 1.008 |
+| 4096 | 1kq bm64q bcm1 | 500.7 | 506.1 | 1.011 |
+| 8192 | 1k bm64 bcm1 w2 ks1 | 784.0 | 799.8 | 1.020 |
+| 16384 | 1k bm64 bcm1 w2 ks1 | 1482 | 1513 | 1.020 |
+| 32768 | 1k bm64 bcm1 w2 ks1 | 2915 | 2986 | 1.025 |
+
+- situv2 比 silu 多 0–5%，多数是 1–3%：只多了 epilogue 的 VALU（tanh、sigmoid 各一组 exp2 + rcp）。
+  CSV 里另一类 kernel（best_2k / best_1k 列）的比值是 0.98–1.03。beta / limit 是运行时参数，取值不影响耗时。
+- CSV 是按 silu 调的。situv2 下 1024 tokens 时 2k（219.9 us）已经比 tuned 的 1k（222.6 us）快，上线 situv2 前
+  最好按 situv2 重新 tune。
+
+### 10.2 支持的 model_dim / inter_dim 范围
+
+测了 15 个 shape（H 2048–8192、I 256–2048，E 256、topk 8、uniform、silu），tokens 取 1 / 16 / 128 / 512 / 2048 /
+8192 / 32768。每个点跑全部候选，取最快：2k 的 bm × bcm × g2；1k 每个 CTA 处理 256 / 384 / 512 列 inter 的切分；
+1kq。耗时包含 sort 和量化。所有 shape 对 torch 参考的 cos 约 1e-3，各候选之间 < 1e-4；寄存器用量从 ISA dump 读出。
+
+**功能约束：**
+
+| 部分 | model_dim (H) | inter_dim (I) |
+|---|---|---|
+| 权重准备 `channel_exponents` | H ≥ 4096 时须为 512 的倍数（4352 报 `unsupported scale group geometry`） | — |
+| 权重准备 fd2（`prep_w*_fast`）、x 量化 | 256 的倍数 | 256 的倍数（384 断言失败） |
+| gemm1（q8s） | 256 的倍数 | 128 的倍数 |
+| gemm2 base | 512 的倍数（`CHUNK_N=512` 的断言，2304 失败） | 256 的倍数 |
+| gemm2 nt4 | 512 的倍数 | 只能 256 |
+| 1k（`fmoe_bm64`） | 256 的倍数 | 256 的倍数，且 (I/128) 能被 ksplit 整除 |
+| 1kq（`fmoe_bm64q`） | 256 的倍数 | 只能 256 |
+
+32 位偏移的上限：W1 字节数 E·I·H 须小于 4 GiB（E=256 时 H 8192 × I 2048 恰好越界）；x 的行偏移 tokens·H
+须小于 2^31。
+
+**性能：** 最快配置的耗时（us）。括号内是效率：参考 (4096, 256) 的耗时按 H·I 线性外推后除以实测值，>1 表示比参考好。
+
+| H | I | 1 | 16 | 128 | 512 | 2048 | 8192 | 32768 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2048 | 256 | 31 (0.70) | 47 (0.73) | 72 (0.93) | 81 (1.01) | 174 (0.94) | 406 (0.97) | 1395 (1.04) |
+| 3072 | 256 | 36 (0.89) | 57 (0.91) | 101 (0.99) | 117 (1.05) | 246 (1.00) | 589 (1.00) | 2129 (1.02) |
+| 4096 | 256 | 43 | 69 | 134 | 164 | 328 | 788 | 2895 |
+| 5120 | 256 | 47 (1.15) | 76 (1.14) | 166 (1.00) | 200 (1.03) | 408 (1.01) | 973 (1.01) | 3653 (0.99) |
+| 6144 | 256 | 52 (1.24) | 89 (1.16) | 200 (1.00) | 229 (1.07) | 484 (1.02) | 1178 (1.00) | 4470 (0.97) |
+| 7168 | 256 | 58 (1.30) | 98 (1.24) | 230 (1.02) | 262 (1.10) | 569 (1.01) | 1385 (1.00) | 5221 (0.97) |
+| 8192 | 256 | 63 (1.37) | 110 (1.26) | 255 (1.05) | 296 (1.11) | 651 (1.01) | 1585 (0.99) | 6029 (0.96) |
+| 2048 | 512 | 31 (1.36) | 72 (0.97) | 133 (1.00) | 154 (1.07) | 298 (1.10) | 738 (1.07) | 2599 (1.11) |
+| 4096 | 512 | 43 (1.98) | 116 (1.20) | 255 (1.05) | 288 (1.14) | 581 (1.13) | 1466 (1.08) | 5178 (1.12) |
+| 7168 | 512 | 60 (2.51) | 202 (1.20) | 425 (1.10) | 497 (1.16) | 990 (1.16) | 2574 (1.07) | 9113 (1.11) |
+| 8192 | 512 | 67 (2.56) | 222 (1.25) | 486 (1.10) | 557 (1.18) | 1160 (1.13) | 2929 (1.08) | 10375 (1.12) |
+| 4096 | 768 | 45 (2.89) | 159 (1.31) | 386 (1.04) | 418 (1.18) | 784 (1.25) | 2189 (1.08) | 7715 (1.13) |
+| 4096 | 1024 | 47 (3.66) | 226 (1.22) | 503 (1.06) | 550 (1.19) | 1028 (1.28) | 2830 (1.11) | 9760 (1.19) |
+| 4096 | 1536 | 51 (5.05) | 308 (1.35) | 724 (1.11) | 812 (1.21) | 1497 (1.31) | 4274 (1.11) | 14711 (1.18) |
+| 4096 | 2048 | 55 (6.25) | 428 (1.29) | 1003 (1.07) | 1102 (1.19) | 2018 (1.30) | 5677 (1.11) | 20344 (1.14) |
+
+- **H 2048–8192 都合理**：128 tokens 以上效率 0.93–1.18，耗时随 H 线性增长；32768 tokens 时 I=256 为
+  547–591 TFLOPS，随 H 增大略降。H=2048 小 batch 的效率约 0.7，是 sort、量化等固定开销占比变大。
+- **I 256–2048 都合理**，I ≥ 512 的效率反而更高（32768 tokens 633–676 TFLOPS），前提是 1k 的切分选对。
+- **寄存器**（gemm1 不随 shape 变；gemm2 和 1k 随 I 变）：
+  - gemm1：247 / 251 VGPR（每 SIMD 2 wave），与 H、I 无关。
+  - gemm2 base：每 128 列 K 一组累加器（I/128 组）。bm64 时 I = 256 / 512 / 768 / 1024 / ≥1536 分别为
+    134 / 216 / 285 / 320 / 512 VGPR，bm32 为 80 / 112 / 148 / 186 / 276–288。所以 I ≥ 1024 时 2k 明显落后：
+    I=2048、32768 tokens 时 2k 为 34.5 ms，1k 为 20.3 ms。
+  - 1k：A2 常驻 VGPR，每 lane I/(4·ksplit) 个。每个 CTA 处理 256 列时 256 VGPR（每 SIMD 2 wave，中小 batch 最好），
+    384 / 512 列时 314–399 VGPR（1 wave，大 batch 最好），更宽就放不下了。
+  - 1kq：约 10 个 VGPR spill、62 个 SGPR spill，与 shape 无关。
+- **新 shape 必须先 tune**：CSV 只有 4096/256、4096/512，其他 shape 查不到行，会回退到 `2k bm64 g1bcm1 g2base`。
+  I ≤ 1024 时比最优慢 1.00–1.28 倍；I = 1536 / 2048 在 8192 tokens 以上慢 1.39–1.81 倍。
+- **tuner 的候选要补**：1k 的 ksplit 只有 {1, I/256}。I ≥ 768 时 ksplit=1 寄存器放不下，而大 batch 最快的每 CTA
+  384 / 512 列切分（I=768 ks2、1024 ks2、1536 ks3、2048 ks4）不在候选里。要支持更大的 I，需要在 `candidates()` 里
+  加上这类切分。
+
+### 10.3 去掉按 token 数重编译
+
+- **gemm1 的 q8 系列 epilogue**：原来把 `AG_ROWS`（q8s 为 `sorted_expert_ids.numel()*tile_m`，q8 为 tokens·topk）
+  和 `MAX_TILES` 当编译期常量，kernel 名里带 `_r{AG_ROWS}`，所以每个新的 token 数都会重编译一次 gemm1。这两个值
+  只用来算 scale 区的偏移、输出 buffer 的越界上限，以及 push 变体的 slot / flag 布局。现在改为运行时 launch 参数
+  `rows`（放在 `epoch` 之后），flag 表步长直接用已有的 `grid`；`a8w4_gemm1()` 的接口不变。push 变体的 `rows` 是
+  和对端的布局约定，同一块 symmetric buffer 上要保持不变（双缓冲 slot 按它划分）。
+- **x 的行量化**：aiter 的 `quantize_rows` 同样把行数编进了 kernel 和 launch grid。`kernels/a8w4_row_quant.py` 是它
+  的副本，行数和 grid 改为 launch 参数，接口不变；`kernels/` 下所有用到它的文件都已改用这份副本（`experiments/`
+  和 aiter 自己的 `a8w4.py` 没改）。
+- **验证**：
+  - gemm1 q8 / q8s（silu、situv2）改前改后 48 组逐位一致（H 4096 × I 256 / 512 × tokens 1 / 16 / 512 / 4096 ×
+    bm32 / bm64+dyn_m），这组用例里 gemm1 的编译次数从 48 次降到 12 次；
+  - 行量化与 aiter 原版逐位一致（cols 2048 / 4096 / 7168 × rows 1–32768 × 静态行数 / `num_valid_ids`），编译次数
+    从 42 次降到 6 次；
+  - 8 卡 `gemm1_ag_tp.py`：q8push / q8pushs 都是 `push bad=0`，q8 对 bf16 的检查数值与改前相同；
+  - tuned MoE `verify`（1–32768 tokens）与 CSV 在噪声范围内一致；gemm1、gemm2、ep8_prep 的 pytest 全过。
+- 与本次改动无关、HEAD 上就有的现象：`test_ep8_moe.py` 的 `test_g1` / `test_g2` 是 CLI 函数，被 pytest 收集时报
+  fixture 错误；EP8 `g1 --tr 1` 打印 `bitexact vs TP kernel: False`。
+
+### 10.4 测试环境
+
+本轮所在的容器里装的是 FlyDSL 0.1.5（本分支要求 0.3.2），aiter 的 JIT `.so` 是旧版本（`module_aiter_core` 缺
+`MlaVersion`），而且整个 `pyhip` 包都不存在（`tools/pyhip_shim` 只处理缺 `pyhip.contrib` 的情况）。为了不改共享
+环境，做法是：
+
+- FlyDSL 0.3.2 用 `pip install --target <目录>` 装到独立目录，通过 `PYTHONPATH` 生效；
+- 设 `AITER_JIT_DIR=<新目录>`，让 aiter 在那里重新编译需要的模块；
+- 用一个 sitecustomize 把整个 `pyhip` 包 stub 掉（做法同 `tools/pyhip_shim`，只是范围扩大到 `pyhip`）。
 
 ---
 

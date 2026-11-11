@@ -37,13 +37,11 @@ from test_a8w4_gemm1 import a8w4_gemm1  # noqa: E402
 import aiter  # noqa: E402
 from aiter import QuantType, dtypes  # noqa: E402
 from aiter.fused_moe import fused_topk, moe_sorting  # noqa: E402
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import (  # noqa: E402
-    channel_exponents,
-    quantize_rows,
-)
+from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import channel_exponents  # noqa: E402
 from aiter.ops.flydsl.kernels.mxfp4_gemm_common import global_typed_ptr  # noqa: E402
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled  # noqa: E402
 from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4  # noqa: E402
+from a8w4_row_quant import quantize_rows  # noqa: E402
 
 MODEL_DIM, INTER_FULL, EXPERTS, TOPK, TILE_N = 4096, 2048, 256, 8, 128
 

@@ -126,9 +126,8 @@ def a8w4_fused_moe(
     ``fuse_quant``: gemm1 quantizes in its epilogue (``q8s``: fp8 by sorted row,
     one f32 scale per (row, 128 cols)) and gemm2 takes the per-128-K-group A
     scales; drops the second row-quant kernel and the bf16 round trip."""
-    from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
-
-    a8w4_gemm1, a8w4_gemm2 = _a8w4_kernels()
+    a8w4_gemm1, a8w4_gemm2 = _a8w4_kernels()  # also puts this dir on sys.path
+    from a8w4_row_quant import quantize_rows
     g1_cfg, g2_cfg = A8W4_E2E_CFGS[block_m]
     g1_cfg = dict(g1_cfg, fast_dec=weights.get("w1_fast_dec", 0))
     g2_cfg = dict(g2_cfg, fast_dec=weights.get("w2_fast_dec", 0))

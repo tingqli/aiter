@@ -51,7 +51,8 @@ from aiter import ActivationType, QuantType, dtypes  # noqa: E402
 from aiter.fused_moe import fused_topk, moe_sorting, torch_moe_stage1, torch_moe_stage2  # noqa: E402
 from aiter.ops.flydsl.kernels import buffer_ops as bo  # noqa: E402
 from aiter.ops.flydsl.kernels.act import gate_up_act, situ_params  # noqa: E402
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import _pack_activation, quantize_rows  # noqa: E402
+from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import _pack_activation  # noqa: E402
+from a8w4_row_quant import quantize_rows  # noqa: E402
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.utils import _global_i32_at, _udiv, _umod  # noqa: E402
 from aiter.ops.flydsl.kernels.mxfp4_gemm_common import lds_typed_ptr, lds_vec_load  # noqa: E402
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled  # noqa: E402

@@ -29,6 +29,7 @@ import argparse
 import functools
 import itertools
 import os
+import sys
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -46,7 +47,6 @@ from aiter.fused_moe import fused_topk, moe_sorting
 from aiter.jit.utils.chip_info import get_gfx
 from aiter.ops.flydsl.kernels import buffer_ops
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_gemm2
-from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.a8w4 import quantize_rows
 from aiter.ops.flydsl.kernels.moe_2stage_a16wmix.utils import (
     _buffer_i32_scalar_read,
     _global_i32_at,
@@ -67,6 +67,9 @@ from aiter.ops.flydsl.kernels.tensor_shim import _to_raw as _raw
 from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 from aiter.test_common import benchmark, checkAllclose, run_perftest
 from aiter.utility import fp4_utils
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from a8w4_row_quant import quantize_rows  # noqa: E402
 
 SUPPORTED_GFX = ["gfx942"]  # FP8-FNUZ MFMA + global bf16x2 atomics
 # LDS epilogue: drain the sorted-id loads before the first atomic (see
