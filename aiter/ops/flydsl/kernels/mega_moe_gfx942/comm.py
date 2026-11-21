@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""megamoe_ep_a8w4 communication kernels (gfx942, FlyDSL): x quant + out zeroing, the
-routing plan with the count exchange, and the completion barrier.
+"""The main path's communication kernels (gfx942): x quant + out zeroing, the routing
+plan with the count exchange, and the completion barrier.
 
 Cross-rank synchronization without L2 write-back / invalidation (``buffer_wbl2`` /
 ``buffer_inv sc0 sc1`` of a system-scope fence): everything a peer reads is written with
 system-scope (sc0 sc1, written-through) stores or lives in the uncached MORI heap, every
 thread waits for its stores (vmcnt 0) before the barrier that precedes a flag store, and
 flags and counts are read with system-scope loads. The mega kernel's remote adds are
-complete at its kernel boundary (ep_finish runs after it on the same stream).
+complete at its kernel boundary (the finish kernel runs after it on the same stream).
 
 Workspace ``ws`` (symmetric, int32): counts [NPES][E_GLOBAL] (row s written by rank s),
 flags [2][NPES] (count row / combine of rank s finished, each holding the call's epoch),
 then arrived [s_cap / BLOCK_M] (routes already written into each sorted block here, added
 by the sources' producers). The epoch is ``status[STATUS_EPOCH] + 1``, a device counter
-of the completed calls that ep_finish advances: the same on every rank (they make the same
+of the completed calls that the finish kernel advances: the same on every rank (they make
 calls) and right in a CUDA graph replay (a launch argument would be frozen in the graph).
 ``sched`` (local, int32): ticket counter of mega-kernel queue q at q * QSTRIDE, the routes
 block b receives at SCHED_EXPECTED + b, gemm1 tiles finished of block b at
-SCHED_EXPECTED + s_cap / BLOCK_M + b. ``plan`` (local, int32): ep_prep -> ep_plan tables
-(PLAN_*), incl. a copy of the count matrix.
+SCHED_EXPECTED + s_cap / BLOCK_M + b. ``plan`` (local, int32): the tables the prep kernel
+leaves the plan kernel (PLAN_*), incl. a copy of the count matrix.
 """
 
 import flydsl.compiler as flyc
@@ -30,10 +30,9 @@ from flydsl.expr.typing import Vector as Vec
 
 from .atomic import _latomic_add, _sys_load_at, _sys_store_at
 from .cvt import _fp8x4_pack
-from .hw import _u
+from .hw import _sleep, _u
 from .mem import (
     _ld,
-    _raw,
     _rsrc,
     _store,
     buffer_store,
@@ -56,7 +55,7 @@ from .protocol import (
 # plan (int32): totals [E_GLOBAL], fewest routes from one source [E_GLOBAL], expert bases
 # [E_GLOBAL + NPES] ([E_GLOBAL + d] = rows of destination d), first block of each
 # destination's 8 mega-kernel queues and its block count [NPES][9], the counts
-# [NPES][E_GLOBAL]. ep_plan stages [0, PLAN_COUNTS) in LDS.
+# [NPES][E_GLOBAL]. The plan kernel stages [0, PLAN_COUNTS) in LDS.
 PLAN_TOTAL = 0
 PLAN_MIN = E_GLOBAL
 PLAN_BASE = 2 * E_GLOBAL
@@ -64,15 +63,15 @@ PLAN_QSTART = 3 * E_GLOBAL + NPES
 PLAN_COUNTS = PLAN_QSTART + NPES * 9
 PLAN_INTS = PLAN_COUNTS + NPES * E_GLOBAL
 MAX_KEYS = 64  # send-order keys: a route's block position in its destination's queue
-ROUTE_BATCH = 8  # ep_prep: routes per thread with their loads issued together
-SLICE_PER_THREAD = 4  # ep_plan: routes per thread (slices of up to 1024 routes)
+ROUTE_BATCH = 8  # prep kernel: routes per thread with their loads issued together
+SLICE_PER_THREAD = 4  # plan kernel: routes per thread (slices of up to 1024 routes)
 PLAN_THREADS = 256
 
 
 @flyc.jit
 def _flag_wait(addr, epoch):
     while _sys_load_at(addr) != epoch:
-        rocdl.s_sleep(1)
+        _sleep(1)
 
 
 def _scan(v, lane, seg):
@@ -80,8 +79,9 @@ def _scan(v, lane, seg):
     pos = lane % fx.Int32(seg)
     for bit in range_constexpr(seg.bit_length() - 1):
         d = 1 << bit
-        src = fx.max(lane - fx.Int32(d), fx.Int32(0)) * fx.Int32(4)
-        other = fx.Int32(rocdl.ds_bpermute(T.i32, _raw(src), _raw(v)))
+        other = fx.Int32(
+            fx.gpu.shuffle_idx(v, fx.max(lane - fx.Int32(d), fx.Int32(0)), 64)
+        )
         v = v + (pos >= fx.Int32(d)).select(other, fx.Int32(0))
     return v
 
@@ -324,9 +324,8 @@ def mega_prep_kernel():
                 + fx.Int64((me * fx.Int32(E_GLOBAL) + e) * fx.Int32(4)),
                 lds[fx.Int32(L_HIST) + e],
             )
-        rocdl.s_waitcnt(
-            vmcnt=0
-        )  # this thread's count row stores and arrived zeroing landed
+        # this thread's count row stores and arrived zeroing landed
+        rocdl.s_waitcnt(vmcnt=0)
         gpu.barrier()
         if tid < fx.Int32(NPES):
             _sys_store_at(

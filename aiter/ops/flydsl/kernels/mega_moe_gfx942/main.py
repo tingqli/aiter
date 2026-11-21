@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""megamoe_ep_a8w4 kernel (gfx942, FlyDSL): an EP8 a8w4 MoE layer as ONE persistent kernel
+"""The main path's mega kernel (gfx942): an EP8 a8w4 MoE layer as one persistent kernel
 that dispatches the tokens (P2P), runs gemm1 and gemm2 interleaved, and adds every route
 into its source rank's output with BF16 atomics (the combine).
 
-Design: pyhip luwei/942-fp8-megamoe (``ep_moe_mega_gfx942.py``,
-docs/megamoe_ep8_942/mega_moe_ep8_design.md) with the FP8 block-scale GEMMs replaced by
-the a8w4 ep3k l128 tiles (``_kloop._make_core``: fd2 mxfp4 W streamed into VGPRs, fp8 A
-through LDS). ``ep_mega_comm.py`` (quant, prep, plan, finish) runs around it.
+The GEMM tiles are ``kloop._make_core``'s (fd2 mxfp4 W streamed into VGPRs, fp8 A
+through LDS). ``comm.py`` (quant, prep, plan, finish) runs around it.
 
 Rows: every rank receives its routes sorted by local expert, each expert padded to
 ``BLOCK_M`` (128) rows = one m-block, the sources' routes interleaved inside an expert.
@@ -19,7 +17,7 @@ Workgroups (one per CU, 512 threads, 64 KB LDS) take tickets from 8 per-XCD queu
 contiguous share of the blocks each; an empty queue sends a workgroup to the next ones)
 until all are empty. Each queue holds:
   [0, producers / 8)  producers (send this rank's routes in the order the destinations'
-                      queues need them, ``ep_plan``);
+                      queues need them, as the plan kernel sorted them);
   then                groups of 2 blocks (both read each W tile at about the same time):
                       the gemm1 tiles of group u and the gemm2 tiles of group u - lag
                       (the combine traffic spreads over the whole kernel).
@@ -42,10 +40,19 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from .act import gate_up_act, situ_params
+from ..act import gate_up_act, situ_params
 from .atomic import _atomic_add_at, _atomic_load_at, _inv_l1, _xcc_id
 from .cvt import _channel_factor, _fp8x4_pack
-from .hw import CM_NT, CM_SC1, CM_SYS, LDS_BYTES_MAX, _opaque_tx, _u
+from .hw import (
+    CM_NT,
+    CM_SC1,
+    CM_SYS,
+    LDS_BYTES_MAX,
+    _opaque_tx,
+    _readlane,
+    _sleep,
+    _u,
+)
 from .kloop import _dispatch_rows, _make_core
 from .mem import (
     _buffer_i32_scalar_read,
@@ -104,7 +111,7 @@ def ep_mega_kernel(
     token in a row's down id (max tokens per rank <= 1 << token_shift). ``QX``: x scales
     (``mega_quant_kernel``), 1 one per (row, 128 cols), 0 one per row. ``BCM1`` /
     ``BCM2``: gemm1 / gemm2 W load cache modifier (2 = nt)."""
-    assert ACT in ("silu", "silu_clamp", "situv2") and QX in (0, 1), (ACT, QX)
+    assert ACT in ("silu", "silu_clamped", "situv2") and QX in (0, 1), (ACT, QX)
     BM = BLOCK_M
     NT = 64 * NW
     N2 = 2 * I
@@ -248,6 +255,9 @@ def ep_mega_kernel(
             lanes in a 64-step loop."""
             taken = fx.Int32(0)
             if lane0 == fx.Int32(0):
+                # Raw asm: FlyDSL 0.5.0 has no stable opaque value. Without it the
+                # atomic gains an mbcnt / bcnt / readfirstlane lane reduction (+10 of 24
+                # instructions in a gfx942 compile-only probe).
                 zero = fx.Int32(
                     llvm.inline_asm(
                         T.i32, [], "v_mov_b32 $0, 0", "=v", has_side_effects=True
@@ -303,6 +313,9 @@ def ep_mega_kernel(
             """Kernel args read again from the kernarg segment through an opaque base: with
             loop-invariant args LLVM hoists every task kind's address math out of the ticket
             loop and runs out of registers."""
+            # Raw intrinsic, asm and loads: FlyDSL 0.5.0 has no stable way to re-read a
+            # kernel argument. Passing the args themselves raises the SGPR spills from 9 to
+            # 151 and the VGPRs from 239 to 250 (gfx942 compile-only, every config).
             ptr4 = ir.Type.parse("!llvm.ptr<4>")
             seg = llvm.call_intrinsic(
                 ptr4, "llvm.amdgcn.kernarg.segment.ptr", [], [], []
@@ -343,13 +356,13 @@ def ep_mega_kernel(
             """wave 0: poll until the i32 at addr >= target, then invalidate the L1."""
             seen = _atomic_load_at(addr, scope)
             while seen < target:
-                rocdl.s_sleep(2)
+                _sleep(2)
                 seen = _atomic_load_at(addr, scope)
             _inv_l1()
 
         # ------------------------------------------------------------------ producer
         def produce(a, index, lane, wave):
-            """Wave j of producer ``index`` sends the routes ep_plan sorted into slice
+            """Wave j of producer ``index`` sends the routes the plan kernel sorted into slice
             8 index + j, in order, CHUNK at a time: all loads of a chunk, then the P2P
             stores, a vmcnt wait, and one arrived[block] increment per route."""
             rows_cap = a["nblk"] * fx.Int32(BM)
@@ -372,15 +385,10 @@ def ep_mega_kernel(
                 )
 
             def lane_value(values, j):
-                return fx.Int32(
-                    rocdl.readlane(T.i32, _raw(fx.Int32(values)), _raw(fx.Int32(j)))
-                )
+                return fx.Int32(fx.gpu.shuffle_idx(fx.Int32(values), fx.Int32(j), 64))
 
             def peer_rsrc(which, rank, nbytes):
-                lo, hi = [
-                    fx.Uint32(rocdl.readlane(T.i32, _raw(h), _raw(rank)))
-                    for h in bases[which]
-                ]
+                lo, hi = [fx.Uint32(_readlane(h, rank)) for h in bases[which]]
                 return _rsrc(
                     fx.Int64((fx.Uint64(hi) << fx.Uint64(32)) | fx.Uint64(lo)), nbytes
                 )
@@ -472,12 +480,9 @@ def ep_mega_kernel(
                         cache_modifier=P2P_AUX,
                     )
                 rocdl.s_waitcnt(vmcnt=0)
-                src = (
-                    (infos >> fx.Int32(ROW_BITS + 5)) & fx.Int32(NPES - 1)
-                ) * fx.Int32(4)
+                src = (infos >> fx.Int32(ROW_BITS + 5)) & fx.Int32(NPES - 1)
                 ws_lo, ws_hi = [
-                    fx.Uint32(rocdl.ds_bpermute(T.i32, _raw(src), _raw(h)))
-                    for h in bases[4]
+                    fx.Uint32(fx.gpu.shuffle_idx(h, src, 64)) for h in bases[4]
                 ]
                 blk = (infos & fx.Int32(ROW_MASK)) // fx.Int32(BM)
                 arrived = fx.Int64(
@@ -665,7 +670,8 @@ def ep_mega_kernel(
                     s = (am == 0.0).select(
                         fx.Float32(1.0), am * fx.Float32(1.0 / 240.0)
                     )
-                    inv = fx.Float32(rocdl.rcp(T.f32, _raw(s)))
+                    with fx.fastmath("afn"):  # v_rcp_f32, not an IEEE division
+                        inv = fx.Float32(1.0) / s
                     srow = bx_m + rows[mi]
                     for c in range_constexpr(NC1):
                         q = _fp8x4_pack(*[ys[mi, c][v] * inv for v in range(4)])
@@ -858,15 +864,12 @@ def ep_mega_kernel(
                                 fx.BFloat16,
                                 align=4,
                             )
-                            llvm.AtomicRMWOp(
-                                llvm.AtomicBinOp.fadd,
+                            fx.atomic_add(
                                 get_element_ptr(
                                     _global_base_ptr1(row_addr), fx.Int32(s * 128)
                                 ),
-                                _raw(pk),
-                                llvm.AtomicOrdering.monotonic,
+                                pk,
                                 syncscope="agent",
-                                alignment=4,
                             )
 
             def epilogue(R, acc):

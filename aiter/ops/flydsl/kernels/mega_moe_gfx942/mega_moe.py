@@ -36,7 +36,7 @@ from ..mega_moe import envs
 from . import host
 from . import weights as _weights
 
-_EP, _MODEL_DIM, _INTER_DIM, _EXPERTS, _NUM_CU = 8, 4096, 2048, 256, 304
+_EP, _MODEL_DIM, _INTER_DIM, _EXPERTS, _TOPK, _NUM_CU = 8, 4096, 2048, 256, 6, 304
 # The main and large kernels split a route id with shifts, so they need a power-of-two
 # top-k: other top-k values are padded with no-route slots.
 _KERNEL_TOPK = 8
@@ -48,15 +48,14 @@ def eligible(
     *, world_size, model_dim, inter_dim, experts, topk, quant="a8w4", act="silu"
 ):
     """Whether this build runs the layer: gfx942 with 304 CUs, EP8 and the MoE shape of
-    DeepSeek-V4-Flash (top-6) or MiMo-V2.6-Flash (top-8)."""
+    DeepSeek-V4-Flash (H 4096, I 2048, 256 experts, top-6)."""
     from aiter.jit.utils.chip_info import get_cu_num, get_gfx_runtime
 
     return (
         get_gfx_runtime() == "gfx942"
         and get_cu_num() == _NUM_CU
-        and (world_size, model_dim, inter_dim, experts)
-        == (_EP, _MODEL_DIM, _INTER_DIM, _EXPERTS)
-        and topk in (6, 8)
+        and (world_size, model_dim, inter_dim, experts, topk)
+        == (_EP, _MODEL_DIM, _INTER_DIM, _EXPERTS, _TOPK)
         and quant == "a8w4"
         and act == "silu"
     )
@@ -103,13 +102,12 @@ class MegaMoEGfx942:
         ):
             raise ValueError(
                 "MegaMoEGfx942 runs gfx942 (304 CUs), EP8, H 4096, I 2048, 256 experts, "
-                f"top-6 / top-8, a8w4 silu; got world_size={world_size} "
+                f"top-6, a8w4 silu; got world_size={world_size} "
                 f"model_dim={model_dim} inter_dim={inter_dim} experts={experts} "
                 f"topk={topk} quant={quant} act={act}"
             )
         if max_tok_per_rank <= 0:
             raise ValueError(f"max_tok_per_rank={max_tok_per_rank} must be positive")
-        from .act import situ_args
         from .protocol import qx_of
 
         self.rank, self.world_size = int(rank), int(world_size)
@@ -119,8 +117,10 @@ class MegaMoEGfx942:
         self.dev = torch.device("cuda", torch.cuda.current_device())
         limit = float(swiglu_limit)
         # As MegaMoEV2: a limit <= 0 means no clamp.
-        self._act = "silu_clamp" if limit > 0 else "silu"
-        self._situ = situ_args(swiglu_limit=limit) if limit > 0 else situ_args()
+        self._act = "silu_clamped" if limit > 0 else "silu"
+        # The kernels' activation scalars, aiter act.situ_params order (beta, 1 / beta,
+        # linear_beta, 1 / linear_beta, swiglu_limit): silu_clamped reads the limit.
+        self._situ = (1.0, 1.0, 1.0, 1.0, limit if limit > 0 else float("inf"))
         self._x_quant, self._qx = x_quant, qx_of(x_quant)
         self._weights = {}
         self._W = self._weight_dict(w1, w1_scale, w2, w2_scale)
@@ -196,8 +196,8 @@ class MegaMoEGfx942:
         s_cap = -(-(NPES * tcap * self.topk + E_LOCAL * BLOCK_M) // BLOCK_M) * BLOCK_M
         if s_cap >= 1 << ROW_BITS or s_cap * H >= BUFFER_BYTES_MAX:
             raise ValueError(
-                f"max_tok_per_rank={self.mtpr}: {s_cap} receive rows of {H} bytes do "
-                "not fit the 32-bit buffer offsets"
+                f"max_tok_per_rank={self.mtpr}: {s_cap} receive rows of {H} bytes pass "
+                "the 2 GiB the kernels address with i32 offsets"
             )
         self._s_cap, self._nblk = s_cap, s_cap // BLOCK_M
         sym = host.symmetric
@@ -409,7 +409,19 @@ class MegaMoEGfx942:
 
     # ---- calls -------------------------------------------------------------------
 
-    def _routes(self, topk_ids, wts, slots):
+    def _routes(self, x, topk_ids, wts, slots):
+        # The kernels take raw pointers: every input must be on this layer's device.
+        T = x.shape[0]
+        for name, t in (("x", x), ("topk_ids", topk_ids), ("wts", wts)):
+            if t.device != self.dev:
+                raise ValueError(f"{name} is on {t.device}, the layer on {self.dev}")
+        if x.dim() != 2 or any(
+            tuple(t.shape) != (T, self.topk) for t in (topk_ids, wts)
+        ):
+            raise ValueError(
+                f"x {tuple(x.shape)}, topk_ids {tuple(topk_ids.shape)}, wts "
+                f"{tuple(wts.shape)}: expected [T, H], [T, {self.topk}], [T, {self.topk}]"
+            )
         # Out-of-range ids are no routes, as in MegaMoEV2 (sglang marks padding rows with
         # id == experts); the kernels skip negative ids only.
         ids = topk_ids.to(torch.int32).masked_fill(topk_ids >= self.experts, -1)
@@ -435,7 +447,7 @@ class MegaMoEGfx942:
         are always skipped, so ``mask_invalid_slots`` has no effect; the output is always
         sliced to T rows."""
         with _on(stream):
-            ids, w = self._routes(topk_ids, wts, _KERNEL_TOPK)
+            ids, w = self._routes(x_bf16, topk_ids, wts, _KERNEL_TOPK)
             if self._large_on:
                 return self._large.forward(x_bf16, ids, w, self._W, self._situ)
             return self._forward_main(x_bf16, w, ids)
@@ -455,10 +467,13 @@ class MegaMoEGfx942:
                 f"x_q {x_q.dtype} / x_scale {x_scale.dtype}: expected "
                 "float8_e4m3fnuz / float32"
             )
-        if tuple(x_scale.shape) != shape:
-            raise ValueError(f"x_scale {tuple(x_scale.shape)}: expected {shape}")
+        if tuple(x_scale.shape) != shape or x_scale.device != self.dev:
+            raise ValueError(
+                f"x_scale {tuple(x_scale.shape)} on {x_scale.device}: expected "
+                f"{shape} on {self.dev}"
+            )
         with _on(stream):
-            ids, w = self._routes(topk_ids, wts, _KERNEL_TOPK)
+            ids, w = self._routes(x_q, topk_ids, wts, _KERNEL_TOPK)
             return self._forward_main(x_q, w, ids, x_scale)
 
     def forward_small_m(
@@ -477,5 +492,5 @@ class MegaMoEGfx942:
                 f"small-input path takes at most {self._small_mtpr}"
             )
         with _on(stream):
-            ids, w = self._routes(topk_ids, wts, self.topk)
+            ids, w = self._routes(x_bf16, topk_ids, wts, self.topk)
             return self._small.forward(x_bf16, ids, w, self._W, self._situ)

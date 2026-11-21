@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""The K loop of the EP GEMM tiles (ep3k ``ep_gemm``, ep1k ``ep_small``, megamoe ``ep_mega``)
-and the dispatch to its row variants.
+"""The K loop of the GEMM tiles of the main, small and large kernels, and the dispatch
+to its row variants.
 
 fd2 mxfp4 W is streamed from HBM straight into VGPRs and decoded to fp8 there; A (fp8, or
 bf16 quantized while staged) goes through LDS.
@@ -14,6 +14,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 from .cvt import _fp4x8_to_fp8x8_fast, _fp8_lut_predelta, _fp8x4_pack, _perm_u32
+from .hw import _sched_fence, _setprio
 from .mem import (
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
@@ -388,7 +389,7 @@ def _make_core(
             raw, lut = read_w(wbufs[u][p], kt)
             if const_expr(more_w):
                 load_w(wbufs[u][1 - p], kt + fx.Int32(PF))
-            rocdl.sched_barrier(0)
+            _sched_fence()
             compute(raw, lut, slot, kt)
 
         def tile_step_v2(kt, u, p, more_w, store_next, load_next2, last_a=False):
@@ -403,7 +404,7 @@ def _make_core(
             raw, lut = read_w(wbufs[u][p], kt)
             a_pair = [read_a2(mi, 0, slot) for mi in range_constexpr(MR)]
             b_cur = decode_b(raw, lut, 0)
-            rocdl.sched_barrier(0)
+            _sched_fence()
             for s in range_constexpr(STEPS):
                 if const_expr(s == W_STEP and more_w):
                     load_w(wbufs[u][1 - p], kt + fx.Int32(PF))
@@ -425,7 +426,7 @@ def _make_core(
                     hook(acc, kt, s)
                 b_nxt = decode_b(raw, lut, s + 1) if s + 1 < STEPS else None
                 mfmas(a_cur, b_cur)
-                rocdl.sched_barrier(0)
+                _sched_fence()
                 b_cur = b_nxt
 
         # v3: the MFMAs of every tile's last step are issued after the next tile's
@@ -452,12 +453,12 @@ def _make_core(
             other its decode / LDS / VMEM work) instead of drifting a whole tile
             apart under oldest-first arbitration."""
             if const_expr(PRIO):
-                rocdl.sched_barrier(0)
-                rocdl.s_setprio(1)
+                _sched_fence()
+                _setprio(1)
             mfmas(a_cur, bws)
             if const_expr(PRIO):
-                rocdl.s_setprio(0)
-                rocdl.sched_barrier(0)
+                _setprio(0)
+                _sched_fence()
 
         def tile_step_v3(kt, u, p, more_w, store_next, load_next2, last_a=False):
             slot = kt % fx.Int32(2)
@@ -467,7 +468,7 @@ def _make_core(
             gpu.barrier()  # A(kt) visible; slot (kt+1)%2 free (read at kt-1)
             a_pair = [read_a2(mi, 0, slot) for mi in range_constexpr(MR)]
             flush_deferred()  # tile kt-1's last step
-            rocdl.sched_barrier(0)
+            _sched_fence()
             for s in range_constexpr(STEPS):
                 if const_expr(s == W_STEP and more_w):
                     load_w(wbufs[u][1 - p], kt + fx.Int32(PF))
@@ -490,7 +491,7 @@ def _make_core(
                 if const_expr(s + 1 < STEPS):
                     b_nxt = decode_b(raw, lut, s + 1)
                     mfma_block(a_cur, b_cur)
-                    rocdl.sched_barrier(0)
+                    _sched_fence()
                     b_cur = b_nxt
                 else:
                     for mi in range_constexpr(MR):

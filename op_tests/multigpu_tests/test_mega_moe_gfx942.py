@@ -6,9 +6,11 @@ The layer is DeepSeek-V4-Flash's MoE: H 4096, I 2048, 256 experts (32 per rank),
 top-6, silu with swiglu_limit 10. Every output is checked against an fp32 reference
 with the clamp.
 
-- test_mega_moe_gfx942: every path (main, large, small) eagerly and as a CUDA graph
-  replay. The ranks hold different token counts, one rank holds none, and some rows are
-  padding (every id == experts, as sglang marks them, or -1) or have invalid slots.
+- test_mega_moe_gfx942: every path (main, main on x quantized beforehand by aiter's
+  per_1x128 quant ("prequant", timed with that quant), large, small) eagerly and as a
+  CUDA graph replay. The ranks hold different token counts, one rank holds none, and
+  some rows are padding (every id == experts, as sglang marks them, or -1) or have
+  invalid slots.
 - test_mega_moe_gfx942_capacity: every rank brings max_tok_per_rank rows. With
   "all_to_one" routing every route of every rank goes to rank 0, which must receive
   all of them (8 x the uniform average; past 2^18 rows at max_tok_per_rank 8192).
@@ -208,6 +210,15 @@ def _perf(tokens, rank, routes):
     return flops, nbytes
 
 
+def _prequant(x):
+    """``forward_prequant``'s input: x quantized by aiter's per_1x128 fp8 quant."""
+    if not x.shape[0]:
+        return x.new_empty(x.shape, dtype=dtypes.fp8), x.new_empty(
+            (0, H // 128), dtype=torch.float32
+        )
+    return aiter.get_torch_quant(aiter.QuantType.per_1x128)(x, quant_dtype=dtypes.fp8)
+
+
 def _run_paths(tokens, paths, inputs, stale, graph, ret):
     """Run each path on ``inputs`` (after one call on ``stale`` inputs, so a row the call
     does not write keeps a stale value) and check it; fills ``ret``."""
@@ -221,6 +232,8 @@ def _run_paths(tokens, paths, inputs, stale, graph, ret):
         def call(x, wts, ids, path=path):
             if path == "small":
                 return mega.forward_small_m(x, wts, ids, max_tokens=max(tokens))
+            if path == "prequant":
+                return mega.forward_prequant(*_prequant(x), wts, ids)
             return mega.forward(x, wts, ids)
 
         if path != "small":
@@ -268,7 +281,7 @@ def test_mega_moe_gfx942(tokens, graph):
     seed = _STATE["case"] = _STATE.get("case", 0) + 2
     inputs = _make_inputs(tokens, rank, seed)
     stale = _make_inputs(tokens, rank, seed + 1, padding=False)
-    paths = ["main"]
+    paths = ["main", "prequant"]
     if mega.large_m_available:
         paths.append("large")
     # The small path takes decode batches only.

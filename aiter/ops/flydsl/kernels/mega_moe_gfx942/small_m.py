@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""megamoe small kernel (gfx942, FlyDSL): the EP8 a8w4 MoE layer for decode-sized batches
+"""The small path's kernel (gfx942): the EP8 a8w4 MoE layer for decode-sized batches
 as ONE kernel launch per call: x quant + dispatch, gemm1, gemm2 and the combine.
 
 Design: aiter ``ops/flydsl/kernels/mega_moe/mega_moe_small_m.py`` (the MegaMoEV2
-small-input path, gfx950), on the a8w4 ep tiles of ``_kloop._make_core`` (fd2 mxfp4 W
+small-input path, gfx950), on the GEMM tiles of ``kloop._make_core`` (fd2 mxfp4 W
 streamed into VGPRs, fp8 A through LDS):
 
 - Fixed slots: every local expert owns TMAX rows on its rank (TMAX >= the batch over all
@@ -24,7 +24,7 @@ streamed into VGPRs, fp8 A through LDS):
   inter cols, m-major) and then its eighth of the gemm2 units (m-tile x NO out cols): the
   same m-tiles, so gemm2 mostly reads a2 rows its own XCD wrote (a2 is written through:
   at the slice ends, and for units taken from another XCD's counter once the own one is
-  empty, another XCD reads them). gemm1 = ep_mega's (TR epilogue: act, fp8 a2 + one scale
+  empty, another XCD reads them). gemm1 = the main kernel's (TR epilogue: act, fp8 a2 + one scale
   per (row, 128 cols); QX 1 rescales the accumulator at every 128-K group, QX 0 applies
   the row scale in the epilogue); a gemm2 unit waits for the I/128 gemm1 units of its
   m-tile (W prefetch already in flight), then writes every row (times the route weight,
@@ -54,7 +54,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from .act import gate_up_act, situ_params
+from ..act import gate_up_act, situ_params
 from .atomic import (
     _atomic_add_at,
     _atomic_load_at,
@@ -139,7 +139,7 @@ def ep_mega_small_kernel(
     W prefetch distance of both GEMMs; ``P``: producer workgroups; ``WPC``: workgroups per
     CU; ``QX``: x scales, 1 one per (row, 128 cols), 0 one per row; ``BCM1`` / ``BCM2``:
     gemm1 / gemm2 W load cache modifier (2 = nt)."""
-    assert ACT in ("silu", "silu_clamp", "situv2") and QX in (0, 1), (ACT, QX)
+    assert ACT in ("silu", "silu_clamped", "situv2") and QX in (0, 1), (ACT, QX)
     NW = 8
     NT = 64 * NW
     NI = 128
@@ -309,7 +309,7 @@ def ep_mega_small_kernel(
         def reload():
             """Kernel args read again from the kernarg segment through an opaque base: with
             loop-invariant args LLVM hoists every unit kind's address math out of the unit
-            loop and runs out of registers (as ep_mega)."""
+            loop and runs out of registers (as the main kernel)."""
             ptr4 = ir.Type.parse("!llvm.ptr<4>")
             seg = llvm.call_intrinsic(
                 ptr4, "llvm.amdgcn.kernarg.segment.ptr", [], [], []
@@ -1209,7 +1209,7 @@ def ep_mega_small_kernel(
 
 # Kernel keys: m-tile rows, gemm2 cols per unit, A bytes per K tile, W prefetch depth,
 # producer workgroups, workgroups per CU, gemm1 / gemm2 W cache modifier. Only BM moves
-# the time beyond +-2% (pyhip experiments/20261118_mega_small).
+# the time beyond +-2% (8x MI300X sweep of each key).
 SMALL_KEY = {
     "BM": 64,
     "NO": 256,

@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""megamoe large kernel (gfx942, FlyDSL): the EP8 a8w4 MoE layer for prefill-sized batches
+"""The large path's kernel (gfx942): the EP8 a8w4 MoE layer for prefill-sized batches
 as ONE kernel launch per call: x quant, the count exchange and the plan, the dispatch,
 gemm1, gemm2 and the combine.
 
 Design: aiter ``ops/flydsl/kernels/mega_moe/mega_moe_large_m.py`` (the MegaMoEV2
-large-input path, gfx950), on the a8w4 ep tiles of ``_kloop._make_core`` (fd2 mxfp4 W
+large-input path, gfx950), on the GEMM tiles of ``kloop._make_core`` (fd2 mxfp4 W
 streamed into VGPRs, fp8 A through LDS; 128-row m-tiles, row variants 32 / 64 / 128):
 
 - Roles (workgroup id; the grid is one workgroup per CU, all resident): 0 the planner,
   [1, P] the producers (producer p serves destination rank p % 8 and the local experts
   e = p // 8 (mod P / 8) there), the rest quantize x.
 - Quant: one wave per token row: x bf16 -> fp8 + f32 scales (amax / 240): QX 1 one per
-  (row, 128 cols), gemm1 rescales its accumulator at every 128-K group (as ``ep_mega``);
-  QX 0 ONE per row, as ``a8w4_moe``'s ep3k (no rescaling: the row scale goes into the
-  epilogue); COMB "add": the row of ``out`` (this rank's output in the symmetric heap) is
+  (row, 128 cols), gemm1 rescales its accumulator at every 128-K group (as the main
+  kernel); QX 0 ONE per row (no rescaling: the row scale goes into the epilogue); COMB "add": the row of ``out`` (this rank's output in the symmetric heap) is
   zeroed. Then the quant count goes up.
 - Producers, first: every route of this rank to one of their (destination, expert)
   segments goes into the segment's list (LDS counters: the route's rank in the segment);
@@ -38,7 +37,7 @@ streamed into VGPRs, fp8 A through LDS; 128-row m-tiles, row variants 32 / 64 / 
   rows arrived; TR epilogue (act, fp8 a2 + one scale per (row, 128 cols), written
   through); then the m-tile's gemm1 count goes up. gemm2 waits for the I / 128 gemm1 units
   of its m-tile; the rows times their weights go back to the routes' source ranks: COMB
-  "add": BF16 atomics into ``out[token]`` (as ``ep_mega``); COMB "fp8" (aiter's transport):
+  "add": BF16 atomics into ``out[token]`` (as the main kernel); COMB "fp8" (aiter's transport):
   fp8 + one f32 scale per 128 cols into ``cin[token, slot]`` (half the XGMI bytes; the
   atomics are bound by them at large batches).
 - Finish: the last workgroup to finish (two-level count) sets ``fflag[me]`` = epoch on every
@@ -66,7 +65,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from .act import gate_up_act, situ_params
+from ..act import gate_up_act, situ_params
 from .atomic import (
     _atomic_add_at,
     _atomic_load_at,
@@ -166,12 +165,12 @@ def ep_mega_large_kernel(
     2). ``P``: producer workgroups (a multiple of 8); ``NO``: gemm2 output cols per unit;
     ``ARB`` / ``PF``: K bytes per A tile / W prefetch distance of both GEMMs; ``QX``: x
     scales, 1 one per (row, 128 cols) (gemm1 rescales its accumulator at every 128-K group,
-    as ep_mega), 0 one per token row; ``COMB``: "add" (BF16 atomics into the source rank's
+    as the main kernel), 0 one per token row; ``COMB``: "add" (BF16 atomics into the source rank's
     ``out``) or "fp8" (fp8 rows + scales into its ``cin``, summed there); ``BCM1`` /
     ``BCM2``: gemm1 / gemm2 W load cache modifier (2 = nt); ``ROUTES``: routes per token,
     the real top-k when the TOPK slots are padded with -1 (default TOPK): sizes the receive
     rows (``large_scap``)."""
-    assert ACT in ("silu", "silu_clamp", "situv2"), ACT
+    assert ACT in ("silu", "silu_clamped", "situv2"), ACT
     assert QX in (0, 1) and COMB in ("add", "fp8"), (QX, COMB)
     ROUTES = ROUTES or TOPK
     assert 0 < ROUTES <= TOPK, (ROUTES, TOPK)
@@ -195,7 +194,7 @@ def ep_mega_large_kernel(
     EPP = E_LOCAL // KP  # (destination, expert) segments per producer
     NQ = GRID - 1 - P  # quant workgroups
     SCAP = large_scap(ROUTES, TCAP)
-    assert SCAP * H < BUFFER_BYTES_MAX, f"{SCAP} receive rows of {H} bytes pass 4 GiB"
+    assert SCAP * H < BUFFER_BYTES_MAX, f"{SCAP} receive rows of {H} bytes pass 2 GiB"
     MAXT = SCAP // BM
     TSH = TCAP.bit_length() - 1  # token bits of a source id
     TOPK_SHIFT = TOPK.bit_length() - 1
@@ -398,7 +397,7 @@ def ep_mega_large_kernel(
         def reload():
             """Kernel args read again from the kernarg segment through an opaque base: with
             loop-invariant args LLVM hoists every unit kind's address math out of the unit
-            loop and runs out of registers (as ep_mega)."""
+            loop and runs out of registers (as the main kernel)."""
             ptr4 = ir.Type.parse("!llvm.ptr<4>")
             seg = llvm.call_intrinsic(
                 ptr4, "llvm.amdgcn.kernarg.segment.ptr", [], [], []
@@ -1601,7 +1600,7 @@ def ep_mega_large_kernel(
 
 # Kernel keys: producer workgroups, gemm2 cols per unit, A bytes per K tile, W prefetch
 # depth, the combine ("add": BF16 atomics, "fp8": fp8 rows summed by the source rank),
-# gemm1 / gemm2 W cache modifier (pyhip experiments/20261118_mega_large).
+# gemm1 / gemm2 W cache modifier (8x MI300X sweep of each key).
 LARGE_KEY = {
     "P": 16,
     "NO": 256,
