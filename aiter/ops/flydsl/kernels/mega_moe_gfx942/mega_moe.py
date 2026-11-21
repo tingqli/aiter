@@ -13,9 +13,9 @@ The paths match MegaMoEV2's:
   adds are done. Its tasks only wait for work that is already running, so it needs no
   co-residency.
 - small (``forward_small_m``, ``small_m.py``) and large (``forward`` once enabled,
-  for now still pyhip's ``MegaMoeLargeEpA8W4``): one kernel per call each. They spin
-  on their peers inside the kernel, so they need the whole GPU: nothing may run on
-  another stream at the same time.
+  ``large_m.py``): one kernel per call each. They spin on their peers inside the
+  kernel, so they need the whole GPU: nothing may run on another stream at the same
+  time.
 
 Every rank builds the same instances in the same order (after MORI shmem is
 initialized) and makes the same calls in the same order, as with MegaMoEV2. Each rank
@@ -121,8 +121,6 @@ class MegaMoEGfx942:
         # As MegaMoEV2: a limit <= 0 means no clamp.
         self._act = "silu_clamp" if limit > 0 else "silu"
         self._situ = situ_args(swiglu_limit=limit) if limit > 0 else situ_args()
-        # pyhip's small / large kernels take the clamp as a dict
-        self._pyhip_situ = {"swiglu_limit": limit} if limit > 0 else None
         self._x_quant, self._qx = x_quant, qx_of(x_quant)
         self._weights = {}
         self._W = self._weight_dict(w1, w1_scale, w2, w2_scale)
@@ -377,14 +375,18 @@ class MegaMoEGfx942:
         self._large = None
         if not enabled:
             return
-        from pyhip.contrib.flydsl.a8w4.megamoe import MegaMoeLargeEpA8W4
+        from .large_m import LargeMRuntime
 
-        self._large = MegaMoeLargeEpA8W4(
-            self._W,
+        self._large = LargeMRuntime(
             rank=self.rank,
-            max_tokens=self.mtpr,
+            world_size=self.world_size,
+            model_dim=self.model_dim,
+            inter_dim=self.inter_dim,
             topk=_KERNEL_TOPK,
             routes=self.topk,
+            max_tokens=self.mtpr,
+            act=self._act,
+            x_quant=self._x_quant,
         )
 
     @property
@@ -435,15 +437,7 @@ class MegaMoEGfx942:
         with _on(stream):
             ids, w = self._routes(topk_ids, wts, _KERNEL_TOPK)
             if self._large_on:
-                return self._large(
-                    x_bf16,
-                    ids,
-                    w,
-                    W=self._W,
-                    act=self._act,
-                    situ=self._pyhip_situ,
-                    x_quant=self._x_quant,
-                )
+                return self._large.forward(x_bf16, ids, w, self._W, self._situ)
             return self._forward_main(x_bf16, w, ids)
 
     __call__ = forward
