@@ -111,6 +111,10 @@ class MegaMoEGfx942:
             )
         if max_tok_per_rank <= 0:
             raise ValueError(f"max_tok_per_rank={max_tok_per_rank} must be positive")
+        if x_quant not in ("per_1x128", "per_token"):
+            raise ValueError(f"x_quant={x_quant!r}: 'per_1x128' or 'per_token'")
+        if swiglu_limit < 0:
+            raise ValueError(f"swiglu_limit={swiglu_limit} must be non-negative")
         from .protocol import qx_of
 
         self.rank, self.world_size = int(rank), int(world_size)
@@ -119,7 +123,7 @@ class MegaMoEGfx942:
         self.mtpr = int(max_tok_per_rank)
         self.dev = torch.device("cuda", torch.cuda.current_device())
         limit = float(swiglu_limit)
-        # As MegaMoEV2: a limit <= 0 means no clamp.
+        # As MegaMoEV2: a limit of 0 means no clamp.
         self._act = "silu_clamped" if limit > 0 else "silu"
         # The kernels' activation scalars, aiter act.situ_params order (beta, 1 / beta,
         # linear_beta, 1 / linear_beta, swiglu_limit): silu_clamped reads the limit.
@@ -152,6 +156,7 @@ class MegaMoEGfx942:
         key = (w1.data_ptr(), w1_scale.data_ptr(), w2.data_ptr(), w2_scale.data_ptr())
         W = self._weights.get(key)
         if W is None:
+            self._check_weights(w1, w1_scale, w2, w2_scale)
             W = {
                 "w1": w1,
                 "w1_scale": w1_scale,
@@ -162,6 +167,28 @@ class MegaMoEGfx942:
             }
             self._weights[key] = W
         return W
+
+    def _check_weights(self, w1, w1_scale, w2, w2_scale):
+        """The kernels read the weights through raw pointers: ``prepare_weights``'
+        output for this rank's experts, contiguous bytes on the layer's device."""
+        E, H, I = self.experts // self.world_size, self.model_dim, self.inter_dim
+        want = (
+            ("w1", w1, (E, 2 * I, H // 2)),
+            ("w1_scale", w1_scale, (E * 2 * I * (H // 32 + 4),)),
+            ("w2", w2, (E, H, I // 2)),
+            ("w2_scale", w2_scale, (E * H * (I // 32 + 4),)),
+        )
+        for name, t, shape in want:
+            ok = t.dim() == len(shape) and tuple(t.shape) == shape
+            if len(shape) == 1:
+                ok = t.numel() == shape[0]
+            if not ok or t.element_size() != 1 or not t.is_contiguous():
+                raise ValueError(
+                    f"{name} {t.dtype} {tuple(t.shape)}: expected contiguous bytes "
+                    f"{shape} (prepare_weights output)"
+                )
+            if t.device != self.dev:
+                raise ValueError(f"{name} is on {t.device}, the layer on {self.dev}")
 
     def bind_weights(self, w1, w1_scale, w2, w2_scale):
         self._W = self._weight_dict(w1, w1_scale, w2, w2_scale)
