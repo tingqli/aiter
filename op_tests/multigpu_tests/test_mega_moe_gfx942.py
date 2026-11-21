@@ -6,9 +6,9 @@ The layer is DeepSeek-V4-Flash's MoE: H 4096, I 2048, 256 experts (32 per rank),
 top-6, silu with swiglu_limit 10. Every output is checked against an fp32 reference
 with the clamp.
 
-- test_mega_moe_gfx942: every path (main, main on x quantized beforehand by aiter's
-  per_1x128 quant ("prequant", timed with that quant), large, small) eagerly and as a
-  CUDA graph replay. The ranks hold different token counts, one rank holds none, and
+- test_mega_moe_gfx942: every path the layer reports available (main, main on x
+  quantized beforehand by aiter's per_1x128 quant ("prequant", timed with that quant),
+  large, small) eagerly and as a CUDA graph replay. The ranks hold different token counts, one rank holds none, and
   some rows are padding (every id == experts, as sglang marks them, or -1) or have
   invalid slots.
 - test_mega_moe_gfx942_capacity: every rank brings max_tok_per_rank rows. With

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""The K loop of the GEMM tiles of the main, small and large kernels, and the dispatch
-to its row variants.
+"""The K loop of the a8w4 GEMM tiles, and the dispatch to its row variants.
 
-fd2 mxfp4 W is streamed from HBM straight into VGPRs and decoded to fp8 there; A (fp8, or
-bf16 quantized while staged) goes through LDS.
+fd2 mxfp4 W is streamed from HBM straight into VGPRs and decoded to fp8 there; fp8 A goes
+through LDS.
 """
 
 import flydsl.compiler as flyc
