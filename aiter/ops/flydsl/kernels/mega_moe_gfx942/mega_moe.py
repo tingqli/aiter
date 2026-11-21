@@ -219,6 +219,10 @@ class MegaMoEGfx942:
         self._bufs = bufs
         i32 = {"dtype": torch.int32, "device": dev}
         self._route_idx = torch.empty(tcap * topk, **i32)
+        # forward's ids / weights padded to the kernels' top-k (see _routes)
+        self._ids_pad = torch.full((tcap, topk), -1, **i32)
+        self._no_route = torch.full((), -1, **i32)
+        self._wts_pad = torch.zeros((tcap, topk), dtype=torch.float32, device=dev)
         self._send_route = torch.empty(tcap * topk, **i32)
         self._send_info = torch.empty(tcap * topk, **i32)
         self._num_valid = torch.zeros(1, **i32)
@@ -424,13 +428,20 @@ class MegaMoEGfx942:
             )
         # Out-of-range ids are no routes, as in MegaMoEV2 (sglang marks padding rows with
         # id == experts); the kernels skip negative ids only.
-        ids = topk_ids.to(torch.int32).masked_fill(topk_ids >= self.experts, -1)
-        wts = wts.to(torch.float32)
-        pad = slots - ids.shape[1]
-        if pad:
-            ids = torch.cat([ids, ids.new_full((ids.shape[0], pad), -1)], dim=1)
-            wts = torch.cat([wts, wts.new_zeros((wts.shape[0], pad))], dim=1)
-        return ids.contiguous(), wts.contiguous()
+        topk_ids = topk_ids.to(torch.int32)
+        if slots == self.topk:
+            ids = torch.where(topk_ids < self.experts, topk_ids, self._no_route)
+            return ids.contiguous(), wts.to(torch.float32).contiguous()
+        # Padded to the kernels' slots in place: the extra slots of these buffers stay
+        # -1 / 0 (no route) from the constructor on.
+        if T > self._tcap:
+            raise ValueError(f"{T} rows: at most {self._tcap} (max_tok_per_rank)")
+        ids, w = self._ids_pad[:T], self._wts_pad[:T]
+        torch.where(
+            topk_ids < self.experts, topk_ids, self._no_route, out=ids[:, : self.topk]
+        )
+        w[:, : self.topk].copy_(wts)
+        return ids, w
 
     def forward(
         self,
