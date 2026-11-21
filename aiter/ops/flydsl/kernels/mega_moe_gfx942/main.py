@@ -540,7 +540,6 @@ def ep_mega_kernel(
                 a_num_bytes=fx.Int64(rows_cap) * fx.Int64(H),
                 ARB=ARB,
                 acm=2,
-                SCH=3,
                 TR=True,
             )
 
@@ -771,7 +770,6 @@ def ep_mega_kernel(
                 a_num_bytes=fx.Int64(rows_cap) * fx.Int64(I),
                 ARB=ARB,
                 acm=2,
-                SCH=3,
                 TR=False,
             )
 

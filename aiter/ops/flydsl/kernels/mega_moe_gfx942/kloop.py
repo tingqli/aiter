@@ -10,16 +10,13 @@ bf16 quantized while staged) goes through LDS.
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from .cvt import _fp4x8_to_fp8x8_fast, _fp8_lut_predelta, _fp8x4_pack, _perm_u32
-from .hw import _sched_fence, _setprio
+from .cvt import _fp4x8_to_fp8x8_fast, _fp8_lut_predelta, _perm_u32
+from .hw import _sched_fence
 from .mem import (
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
-    _lds_f32_store_masked,
-    lds_typed_ptr,
 )
 
 
@@ -76,11 +73,8 @@ def _make_core(
     a_num_bytes,
     ARB=256,
     acm=2,
-    SCH=1,
     ST_STEP=None,
-    PRIO=0,
     TR=False,
-    AQ8=False,
 ):
     """Trace-time builder of the streamed-W K loop.
 
@@ -96,12 +90,13 @@ def _make_core(
     after the first A tile's loads are issued, before they go to LDS (e.g. finish a
     table from loads ``pre_a`` issued without waiting for A in between).
     ``ARB``: A bytes per row per K tile (128 / 256).
-    ``AQ8``: A source is bf16 (``row_base16`` in bf16 16 B units), quantized while
-    staged to fp8 with one scale per (row, 128-K tile); the per-row ratio
-    s[kt-1]/s[kt] (1 at kt 0) goes to LDS f32 [2][BM] at ``2*BM*ARB`` (slot kt%2,
-    visible from tile kt's barrier) and the last tile's scale to f32 [BM] after it.
+
+    Each K tile's W prefetch, the next A tile's LDS store and the one after's global
+    load are issued between MFMA steps (step ``W_STEP`` / ``ST_STEP``), A fragments
+    (read as step pairs) and B decodes run one step ahead, and every step is a
+    separate scheduling region. The MFMAs of a tile's last step are issued after the
+    next tile's barrier, so the A reads of the new tile overlap MFMA work.
     """
-    assert not AQ8 or ARB == 128, "AQ8: one 128-K group per fp8 tile"
     TK = ARB  # K per tile (1 B per fp8 A element)
     KG = TK // 128
     assert KG >= 1, "a K tile holds whole 128-K W chunks"
@@ -187,9 +182,7 @@ def _make_core(
         fx.recast_iter(fx.Int32, lds_ptr), fx.make_layout(LDS_BYTES // 4, 1)
     )
     lds16 = fx.logical_divide(lds_flat, fx.make_layout(4, 1))
-    lds8 = fx.logical_divide(lds_flat, fx.make_layout(2, 1))
     lds_w_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)
-    lds_r_atom = fx.make_copy_atom(fx.UniversalCopy64b(), fx.Int32)
     lds_r2_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)
     mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fx.Float8E4M3FNUZ))
 
@@ -199,7 +192,6 @@ def _make_core(
     def run(R, row_base16, hook=None, pre_a=None, post_a=None):
         MR = R // 16
         A_LOADS = -(-(R * CH) // NT)  # 16 B A chunks per thread per tile
-        AU = 2 if AQ8 else 1  # 16 B source units per LDS chunk
         a_src, a_dst, a_ok, a_row, a_c16 = [], [], [], [], []
         for i in range_constexpr(A_LOADS):
             ch = tx + fx.Int32(i * NT)
@@ -214,95 +206,26 @@ def _make_core(
 
         def a_sources():  # after pre_a: row_base16 may read rows written by a producer
             for i in range_constexpr(A_LOADS):
-                a_src.append(row_base16(a_row[i]) + a_c16[i] * fx.Int32(AU))
+                a_src.append(row_base16(a_row[i]) + a_c16[i])
 
         a_regs = [
-            [fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32) for _ in range(AU)]
-            for _ in range(A_LOADS)
+            fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32) for _ in range(A_LOADS)
         ]
-        if const_expr(AQ8):
-            assert CH == 8 and NT % 8 == 0
-            RQ = 2 * SLOT // 4  # f32 index of the ratio slots, fin after them
-            lds_f = lds_typed_ptr(fx.Int32(fx.ptrtoint(lds_ptr)), T.f32)
-            s_prev = [
-                fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-                for _ in range(A_LOADS)
-            ]
 
         def load_a(kt):
-            k16 = kt * fx.Int32(CH * AU)
+            k16 = kt * fx.Int32(CH)
             for i in range_constexpr(A_LOADS):
-                for h in range_constexpr(AU):
-                    fx.copy(
-                        a_atom,
-                        fx.slice(a_tiles, (None, a_src[i] + k16 + fx.Int32(h))),
-                        a_regs[i][h],
-                    )
+                fx.copy(a_atom, fx.slice(a_tiles, (None, a_src[i] + k16)), a_regs[i])
 
-        def quant_chunk(i, slot, first, last):
-            """16 bf16 -> 16 fp8 (row scale over the row's 8 chunk lanes) + ratio/fin."""
-            vals = []
-            for h in range_constexpr(2):
-                v8 = (
-                    Vec(fx.memref_load_vec(a_regs[i][h]))
-                    .bitcast(fx.BFloat16)
-                    .to(fx.Float32)
-                )
-                vals.extend(fx.Float32(v8[j]) for j in range(8))
-            am = fx.Float32(0.0)
-            for v in vals:
-                am = fx.maxnumf(am, fx.absf(v))
-            for bit in range_constexpr(3):
-                am = fx.maxnumf(am, am.shuffle_xor(1 << bit, 64))
-            s = (am == 0.0).select(fx.Float32(1.0), am / 240.0)
-            inv = 1.0 / s
-            q = Vec.from_elements(
-                [
-                    _fp8x4_pack(*[vals[4 * j + k] * inv for k in range(4)])
-                    for j in range(4)
-                ],
-                fx.Int32,
-            )
-            if const_expr(first):
-                ratio = fx.Float32(1.0)
-            else:
-                ratio = fx.Float32(Vec(fx.memref_load_vec(s_prev[i]))[0]) / s
-            s_prev[i].store(Vec.from_elements([s], fx.Float32))
-            head = a_ok[i] & (a_c16[i] == fx.Int32(0))
-            _lds_f32_store_masked(
-                lds_f,
-                fx.Int32(RQ) + fx.Int32(slot) * fx.Int32(BM) + a_row[i],
-                ratio,
-                head,
-            )
-            if const_expr(last):
-                _lds_f32_store_masked(lds_f, fx.Int32(RQ + 2 * BM) + a_row[i], s, head)
-            return q
-
-        def store_a(slot, first=False, last=False):
+        def store_a(slot):
             s16 = fx.Int32(slot) * fx.Int32(SLOT // 16)
             for i in range_constexpr(A_LOADS):
                 dst = fx.slice(lds16, (None, a_dst[i] + s16))
-                src = a_regs[i][0]
-                if const_expr(AQ8):
-                    src = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-                    src.store(quant_chunk(i, slot, first, last))
+                src = a_regs[i]
                 if const_expr((i + 1) * NT <= R * CH):
                     fx.copy(lds_w_atom, src, dst)
                 else:
                     _masked_lds_store(lds_w_atom, src, dst, a_ok[i])
-
-        def read_a(mi, s, slot):
-            row = lane_mod_16 + fx.Int32(mi * 16)
-            # K32 step: bytes (s//4)*128 + klane*32 + (s%4)*8
-            byte = fx.Int32((s // 4) * 128 + (s % 4) * 8) + lane_div_16 * fx.Int32(32)
-            c16 = swz(row, byte // fx.Int32(16))
-            off8 = (
-                row * fx.Int32(ARB) + c16 * fx.Int32(16) + byte % fx.Int32(16)
-            ) // fx.Int32(8) + fx.Int32(slot) * fx.Int32(SLOT // 8)
-            r = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
-            fx.copy_atom_call(lds_r_atom, fx.slice(lds8, (None, off8)), r)
-            return Vec(fx.memref_load_vec(r))
 
         def read_a2(mi, s, slot):
             """16 B = the A fragments of MFMA steps s, s+1 (s even): one
@@ -338,9 +261,6 @@ def _make_core(
                 bws[k] = Vec(b8.bitcast(fx.Int32))
             return bws
 
-        def a_frags(s, slot):
-            return [read_a(mi, s, slot) for mi in range_constexpr(MR)]
-
         ELEM = fx.Float8E4M3FNUZ
         NEL = 8
 
@@ -354,15 +274,6 @@ def _make_core(
                     else:
                         fx.gemm(mma_atom, acc[k][mi], af, bf, acc[k][mi])
 
-        def compute(raw, lut, slot, kt):
-            a_cur = a_frags(0, slot)
-            for s in range_constexpr(STEPS):
-                a_nxt = a_frags(s + 1, slot) if s + 1 < STEPS else None
-                if const_expr(hook is not None):
-                    hook(acc, kt, s)
-                mfmas(a_cur, decode_b(raw, lut, s))
-                a_cur = a_nxt
-
         # W prefetch buffers: wbufs[u][p] holds the tiles kt = u (mod PF) of parity
         # p = (kt // PF) % 2; the loop body covers 2*PF tiles.
         wbufs = [[new_wbuf() for _ in range(2)] for _ in range(PF)]
@@ -374,93 +285,27 @@ def _make_core(
         load_a(fx.Int32(0))
         if const_expr(post_a is not None):
             post_a()
-        store_a(0, first=True, last=KT == 1)
+        store_a(0)
         load_a(fx.Int32(1))
 
-        def tile_step_v1(kt, u, p, more_w, store_next, load_next2, last_a=False):
-            """K tile kt: W in wbufs[u][p], A in LDS slot kt%2, A(kt+1) in regs."""
-            slot = kt % fx.Int32(2)
-            rocdl.s_waitcnt(lgkmcnt=0)
-            gpu.barrier()  # A(kt) visible; slot (kt+1)%2 free (read at kt-1)
-            if const_expr(store_next):
-                store_a(fx.Int32(1) - slot, last=last_a)
-            if const_expr(load_next2):
-                load_a(kt + fx.Int32(2))
-            raw, lut = read_w(wbufs[u][p], kt)
-            if const_expr(more_w):
-                load_w(wbufs[u][1 - p], kt + fx.Int32(PF))
-            _sched_fence()
-            compute(raw, lut, slot, kt)
-
-        def tile_step_v2(kt, u, p, more_w, store_next, load_next2, last_a=False):
-            """Same data flow as v1, but the W prefetch, the A(kt+1) LDS store and the
-            A(kt+2) global load are issued between MFMA steps (step ``W_STEP`` /
-            ``ST_STEP``), A fragments (read as step pairs) and B decodes run one step
-            ahead, and every step is a separate scheduling region: after the barrier
-            only step 0's A reads and B decode stand before the first MFMA."""
-            slot = kt % fx.Int32(2)
-            rocdl.s_waitcnt(lgkmcnt=0)
-            gpu.barrier()  # A(kt) visible; slot (kt+1)%2 free (read at kt-1)
-            raw, lut = read_w(wbufs[u][p], kt)
-            a_pair = [read_a2(mi, 0, slot) for mi in range_constexpr(MR)]
-            b_cur = decode_b(raw, lut, 0)
-            _sched_fence()
-            for s in range_constexpr(STEPS):
-                if const_expr(s == W_STEP and more_w):
-                    load_w(wbufs[u][1 - p], kt + fx.Int32(PF))
-                if const_expr(s == ST_STEP and store_next):
-                    store_a(fx.Int32(1) - slot, last=last_a)
-                    if const_expr(load_next2):
-                        load_a(kt + fx.Int32(2))
-                a_cur = [
-                    Vec.from_elements(
-                        [a_pair[mi][2 * (s % 2)], a_pair[mi][2 * (s % 2) + 1]], fx.Int32
-                    )
-                    for mi in range_constexpr(MR)
-                ]
-                if const_expr(
-                    s % 2 == 1 and s + 1 < STEPS
-                ):  # next pair, one step ahead
-                    a_pair = [read_a2(mi, s + 1, slot) for mi in range_constexpr(MR)]
-                if const_expr(hook is not None):
-                    hook(acc, kt, s)
-                b_nxt = decode_b(raw, lut, s + 1) if s + 1 < STEPS else None
-                mfmas(a_cur, b_cur)
-                _sched_fence()
-                b_cur = b_nxt
-
-        # v3: the MFMAs of every tile's last step are issued after the next tile's
-        # barrier (their operands wait in a_def / b_def), so the A reads of the new
-        # tile overlap MFMA work instead of an idle pipe. Tile 0 "issues" a zero-A
-        # deferred step (adds 0).
+        # The MFMAs of every tile's last step are issued after the next tile's barrier
+        # (their operands wait in a_def / b_def), so the A reads of the new tile overlap
+        # MFMA work instead of an idle pipe. Tile 0 "issues" a zero-A deferred step
+        # (adds 0).
         a_def = [fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32) for _ in range(MR)]
         b_def = {k: fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32) for k in keys}
-        if const_expr(SCH == 3):
-            for mi in range_constexpr(MR):
-                a_def[mi].store(Vec.filled(2, 0, fx.Int32))
-            for k in keys:
-                b_def[k].store(Vec.filled(2, 0, fx.Int32))
+        for mi in range_constexpr(MR):
+            a_def[mi].store(Vec.filled(2, 0, fx.Int32))
+        for k in keys:
+            b_def[k].store(Vec.filled(2, 0, fx.Int32))
 
         def flush_deferred():
-            mfma_block(
+            mfmas(
                 [Vec(fx.memref_load_vec(a_def[mi])) for mi in range_constexpr(MR)],
                 {k: Vec(fx.memref_load_vec(b_def[k])) for k in keys},
             )
 
-        def mfma_block(a_cur, bws):
-            """PRIO: the step's MFMAs run at raised wave priority as one scheduling
-            region, so the two waves of a SIMD ping-pong (one issues MFMAs, the
-            other its decode / LDS / VMEM work) instead of drifting a whole tile
-            apart under oldest-first arbitration."""
-            if const_expr(PRIO):
-                _sched_fence()
-                _setprio(1)
-            mfmas(a_cur, bws)
-            if const_expr(PRIO):
-                _setprio(0)
-                _sched_fence()
-
-        def tile_step_v3(kt, u, p, more_w, store_next, load_next2, last_a=False):
+        def tile_step(kt, u, p, more_w, store_next, load_next2):
             slot = kt % fx.Int32(2)
             raw, lut = read_w(wbufs[u][p], kt)  # W regs only: before the barrier
             b_cur = decode_b(raw, lut, 0)
@@ -473,7 +318,7 @@ def _make_core(
                 if const_expr(s == W_STEP and more_w):
                     load_w(wbufs[u][1 - p], kt + fx.Int32(PF))
                 if const_expr(s == ST_STEP and store_next):
-                    store_a(fx.Int32(1) - slot, last=last_a)
+                    store_a(fx.Int32(1) - slot)
                     if const_expr(load_next2):
                         load_a(kt + fx.Int32(2))
                 a_cur = [
@@ -490,7 +335,7 @@ def _make_core(
                     hook(acc, kt, s)
                 if const_expr(s + 1 < STEPS):
                     b_nxt = decode_b(raw, lut, s + 1)
-                    mfma_block(a_cur, b_cur)
+                    mfmas(a_cur, b_cur)
                     _sched_fence()
                     b_cur = b_nxt
                 else:
@@ -498,8 +343,6 @@ def _make_core(
                         a_def[mi].store(a_cur[mi])
                     for k in keys:
                         b_def[k].store(b_cur[k])
-
-        tile_step = {1: tile_step_v1, 2: tile_step_v2, 3: tile_step_v3}[SCH]
 
         @flyc.jit
         def _k_loop():
@@ -518,10 +361,8 @@ def _make_core(
                 kt + PF < KT,
                 kt + 1 < KT,
                 kt + 2 < KT,
-                kt + 1 == KT - 1,
             )
-        if const_expr(SCH == 3):
-            flush_deferred()
+        flush_deferred()
         rocdl.s_waitcnt(lgkmcnt=0)
         gpu.barrier()  # every wave is done reading A from LDS
         return acc

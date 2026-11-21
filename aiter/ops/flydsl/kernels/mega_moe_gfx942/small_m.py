@@ -642,7 +642,6 @@ def ep_mega_small_kernel(
                 a_num_bytes=fx.Int64(ROWS * H),
                 ARB=ARB,
                 acm=2,
-                SCH=3,
                 TR=True,
             )
 
@@ -850,7 +849,6 @@ def ep_mega_small_kernel(
                 a_num_bytes=fx.Int64(A2_ROWS * I),
                 ARB=ARB,
                 acm=2,
-                SCH=3,
                 TR=False,
             )
 

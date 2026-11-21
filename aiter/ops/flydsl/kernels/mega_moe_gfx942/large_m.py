@@ -917,7 +917,6 @@ def ep_mega_large_kernel(
                 a_num_bytes=SCAP * H,
                 ARB=ARB,
                 acm=2,
-                SCH=3,
                 TR=True,
             )
 
@@ -1143,7 +1142,6 @@ def ep_mega_large_kernel(
                 a_num_bytes=SCAP * I,
                 ARB=ARB,
                 acm=2,
-                SCH=3,
                 TR=False,
             )
 

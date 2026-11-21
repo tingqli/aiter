@@ -2,7 +2,7 @@
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 """Number format conversions on registers.
 
-f32 -> fp8 (FNUZ) / bf16 packing for the epilogues, and the fd2 decode of the mxfp4
+f32 -> fp8 (FNUZ) packing for the epilogues, and the fd2 decode of the mxfp4
 weights into fp8 MFMA operands with its per-channel scale factor.
 """
 
@@ -34,22 +34,6 @@ def _fp8x4_pack(a, b, c, d):
     mag = packed & fx.Uint32(0x7F7F7F7F)
     zero = (~(mag + fx.Uint32(0x7F7F7F7F))) & fx.Uint32(0x80808080)
     return (packed & ~zero).bitcast(fx.Int32)
-
-
-def _bf16x2_rne(a, b):
-    """2 finite f32 -> one i32 of 2 bf16, round-to-nearest-even (a in the low half;
-    no NaN handling: epilogue values are finite)."""
-    r = []
-    for x in (a, b):
-        u = fx.Float32(x).bitcast(fx.Uint32)
-        r.append(u + fx.Uint32(0x7FFF) + ((u >> fx.Uint32(16)) & fx.Uint32(1)))
-    return _perm_u32(r[1], r[0], 0x07060302).bitcast(fx.Int32)
-
-
-def _rnu_hi(x):
-    """f32 -> i32 whose high half is bf16(x), rounded to nearest, ties away from
-    zero (one add; differs from RNE only on exact ties)."""
-    return fx.Float32(x).bitcast(fx.Int32) + fx.Int32(0x8000)
 
 
 # ---- fp4 -> fp8 decode of the fd2 weights -------------------------------------------

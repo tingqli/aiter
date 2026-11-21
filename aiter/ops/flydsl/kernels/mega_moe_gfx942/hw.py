@@ -14,14 +14,11 @@ from flydsl.expr.typing import T
 from .mem import _raw
 
 NUM_CU = 304
-NUM_XCD = 8  # the hardware deals WGs round robin to the XCDs: WG i runs on XCD i % 8
 LDS_BYTES_MAX = 65536  # per WG; a kernel over it fails at launch without raising
 
 # cache policy bits of buffer / global loads and stores (the aux operand)
 CM_SC0, CM_NT, CM_SC1 = 1, 2, 16
 CM_SYS = CM_SC0 | CM_SC1  # system scope: loads bypass, stores write through the XCD L2s
-
-DPP_QUAD_SWAP = 0xB1  # quad_perm [1, 0, 3, 2]: lane L <- lane L ^ 1
 
 
 def _u(v):
@@ -50,12 +47,6 @@ def _sched_fence():
     # sched_barrier is unstable (not in fx.rocdl.__all__). The stable fx.rocdl.sched_*
     # helpers are sched_group_barriers: they order groups of instructions, not a fence.
     rocdl.sched_barrier(0)
-
-
-def _setprio(p):
-    """This wave's issue priority (s_setprio p)."""
-    # s_setprio is unstable (not in fx.rocdl.__all__) and has no stable counterpart.
-    rocdl.s_setprio(p)
 
 
 def _opaque_tx(tx):
