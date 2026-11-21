@@ -47,6 +47,13 @@ def compile_moe_gemm1(
         activation,
         swiglu_limit,
     )
+    if weight_quant_type == "block":
+        if K % 512:
+            raise ValueError("Blockscale Gate/Up requires K divisible by 512")
+        if N % 256:
+            raise ValueError("Blockscale Gate/Up requires each half divisible by 128")
+        if BLOCK_TILE_SIZE_N not in (32, 64, 128):
+            raise ValueError("Blockscale Gate/Up requires BLOCK_TILE_SIZE_N 32/64/128")
     if alg == "batch1":
         assert K % 256 == 0, "batch1 Gate/Up requires K divisible by 256"
     if fused_down_clear:
@@ -139,7 +146,13 @@ def compile_moe_gemm1(
         weight_dtype = fx.Float8E4M3FNUZ
 
     TensorWithIndex, _read_sorted_index, gemm_splitk = make_gemm_helpers(
-        K, weight_dtype, BLOCK_TILE_SIZE_M, TOPK
+        K,
+        weight_dtype,
+        BLOCK_TILE_SIZE_M,
+        TOPK,
+        N,
+        BLOCK_TILE_SIZE_N,
+        weight_quant_type=weight_quant_type,
     )
 
     def _clamp_gateup(gate, up):
@@ -728,6 +741,9 @@ def compile_moe_gemm1(
                 arg_p_weight,
                 lds,
                 splitk_waves=4,
+                p_w_scale=p_w_scale,
+                expert_id=expert_id,
+                gateup_contiguous_n=contiguous_n,
             )
 
             c_frag_bf16 = _apply_scale_gateup_bf16(
@@ -783,6 +799,9 @@ def compile_moe_gemm1(
                 lds,
                 splitk_waves=4,
                 a_with_index=False,
+                p_w_scale=p_w_scale,
+                expert_id=expert_id,
+                gateup_contiguous_n=contiguous_n,
             )
 
             c_frag_bf16 = _apply_scale_gateup_bf16(
