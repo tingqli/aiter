@@ -12,10 +12,10 @@ The paths match MegaMoEV2's:
   its source rank's output (BF16 atomics); ``comm.py`` then waits until all ranks'
   adds are done. Its tasks only wait for work that is already running, so it needs no
   co-residency.
-- small (``forward_small_m``) and large (``forward`` once enabled): one kernel per
-  call each, for now still pyhip's (``pyhip.contrib.flydsl.a8w4.megamoe``). They
-  spin on their peers inside the kernel, so they need the whole GPU: nothing may run
-  on another stream at the same time.
+- small (``forward_small_m``, ``small_m.py``) and large (``forward`` once enabled,
+  for now still pyhip's ``MegaMoeLargeEpA8W4``): one kernel per call each. They spin
+  on their peers inside the kernel, so they need the whole GPU: nothing may run on
+  another stream at the same time.
 
 Every rank builds the same instances in the same order (after MORI shmem is
 initialized) and makes the same calls in the same order, as with MegaMoEV2. Each rank
@@ -359,10 +359,17 @@ class MegaMoEGfx942:
         self._small, self._small_mtpr = None, 0
         if not enabled:
             return
-        from pyhip.contrib.flydsl.a8w4.megamoe import MegaMoeSmallEpA8W4
+        from .small_m import SmallMRuntime
 
-        self._small = MegaMoeSmallEpA8W4(
-            self._W, rank=self.rank, tmax=self.world_size * mtpr, topk=self.topk
+        self._small = SmallMRuntime(
+            rank=self.rank,
+            world_size=self.world_size,
+            model_dim=self.model_dim,
+            inter_dim=self.inter_dim,
+            topk=self.topk,
+            tmax=self.world_size * mtpr,
+            act=self._act,
+            x_quant=self._x_quant,
         )
         self._small_mtpr = mtpr
 
@@ -477,12 +484,4 @@ class MegaMoEGfx942:
             )
         with _on(stream):
             ids, w = self._routes(topk_ids, wts, self.topk)
-            return self._small(
-                x_bf16,
-                ids,
-                w,
-                W=self._W,
-                act=self._act,
-                situ=self._pyhip_situ,
-                x_quant=self._x_quant,
-            )
+            return self._small.forward(x_bf16, ids, w, self._W, self._situ)
