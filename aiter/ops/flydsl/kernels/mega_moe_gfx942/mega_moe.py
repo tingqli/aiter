@@ -20,7 +20,10 @@ The paths match MegaMoEV2's:
 Every rank builds the same instances in the same order (after MORI shmem is
 initialized) and makes the same calls in the same order, as with MegaMoEV2. Each rank
 receives at most every route of every rank (8 x max_tok_per_rank x topk rows plus one
-partial block per expert), so no route is dropped.
+partial block per expert), so no route is dropped. The main path's buffers at
+max_tok_per_rank 2048 / 4096 / 8192: 0.42 / 0.82 / 1.63 GiB of the MORI symmetric heap
+(``MORI_SHMEM_HEAP_SIZE``) plus 0.21 / 0.41 / 0.81 GiB of device memory; 8192 is the
+largest (the receive buffer stays below 2 GiB).
 
 Weights: the standard aiter a16w4 preshuffle (``shuffle_weight_a16w4(w, 16, False)``,
 ``shuffle_scale_a16w4``), converted once per layer by ``prepare_weights`` into the fd2
