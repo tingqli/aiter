@@ -10,18 +10,32 @@ import aiter
 from aiter import ActivationType, QuantType
 from aiter.fused_moe import AUX_SORT_OPUS, moe_sorting
 from aiter.fused_moe_registry import FusedMoeRequest
-from aiter.jit.utils.chip_info import get_cu_num, get_gfx
-from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_config import (
-    m128_down_lds_bytes,
-    routed_down_lds_bytes,
-)
+from aiter.jit.utils.chip_info import get_cu_num, get_gfx_runtime
 from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8 import (
     flydsl_absmax,
     flydsl_quant_per_tensor,
     invert_sorted_ids,
     sorted_sum,
 )
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_config import (
+    m128_down_lds_bytes,
+    prefill_buffer_reason,
+    routed_down_lds_bytes,
+)
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_gemm1 import (
+    fp8_blockscale_stage1,
+)
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_gemm2 import (
+    M128_QUEUE_SIZE,
+    make_m128_down,
+)
 from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.common import _ptr
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_8wave_down import (
+    flydsl_moe_gemm_8wave_down,
+)
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_packed_reduce import (
+    make_moe_sum,
+)
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled
 
 _BLOCKSCALE_PREFILL_PATHS = ("block_m128", "block_m128_persistent", "block_8wave")
@@ -182,7 +196,16 @@ class Config:
                     )
             except ValueError as error:
                 return str(error)
-            return None
+            return prefill_buffer_reason(
+                tokens=problem.batch,
+                hidden=problem.hidden_dim,
+                inter=problem.inter_dim,
+                model_dim=problem.model_dim,
+                topk=problem.topk,
+                num_experts=problem.experts,
+                routed=self.down_path == "block_8wave",
+                num_oc_splits=self.num_oc_splits,
+            )
         if self.is_blockscale_decode:
             if problem.quant_type != "block":
                 return "block_a16w8 requires FP8 blockscale weights"
@@ -315,7 +338,7 @@ def default_config(token: int) -> str:
 
 
 def get_tune_space():
-    architecture = get_gfx()
+    architecture = get_gfx_runtime()
     prefill = [(256, 128), (128, 256), (128, 128)]
     configs = [
         Config(16, 16, 16, False),
@@ -330,7 +353,7 @@ def get_tune_space():
     ]
     if architecture == "gfx950":
         # gfx950 runs only the blockscale configs.
-        configs = block_decode
+        configs = list(block_decode)
         # Stage1 K rotation is independent of the Down path; tune both choices.
         configs.extend(
             Config(
@@ -463,7 +486,9 @@ def _gateup_output(hidden_states: torch.Tensor, problem: _Problem):
 def _validate_blockscale_inputs(
     hidden_states, w1, w2, topk_weight, topk_ids, w1_scale, w2_scale, problem
 ):
-    fp8_dtype = torch.float8_e4m3fn if get_gfx() == "gfx950" else torch.float8_e4m3fnuz
+    fp8_dtype = (
+        torch.float8_e4m3fn if get_gfx_runtime() == "gfx950" else torch.float8_e4m3fnuz
+    )
     if not (getattr(w1, "is_shuffled", False) and getattr(w2, "is_shuffled", False)):
         raise ValueError("blockscale requires shuffle_weight(16,16) for both weights")
     if (
@@ -510,8 +535,6 @@ def _run_blockscale_prefill(
     config,
     problem,
 ):
-    from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_gemm1 import fp8_blockscale_stage1
-
     with torch.cuda.device(hidden_states.device):
         si, sw, se, valid, output = moe_sorting(
             topk_ids,
@@ -558,13 +581,10 @@ def _run_blockscale_prefill(
             "num_oc_splits": config.num_oc_splits,
         }
         if config.down_path == "block_8wave":
-            from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_8wave_down import (
-                flydsl_moe_gemm_8wave_down,
-            )
-
             down = flydsl_moe_gemm_8wave_down(
                 **params, block_m=256, block_n=config.down_block_n
             )
+            # Every (token, slot) route is written: native sorting has each once.
             routes = torch.empty(
                 (problem.batch, problem.topk, problem.model_dim),
                 dtype=output.dtype,
@@ -586,12 +606,6 @@ def _run_blockscale_prefill(
             )
             torch.sum(routes, dim=1, out=output)
         else:
-            from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_gemm2 import (
-                M128_QUEUE_SIZE,
-                make_m128_down,
-            )
-            from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_packed_reduce import make_moe_sum
-
             persistent = config.down_path == "block_m128_persistent"
             down = make_m128_down(
                 **params, persistent=persistent, is_sorted_bm_256=True
@@ -618,7 +632,8 @@ def _run_blockscale_prefill(
                 valid,
                 counter,
             )
-            # Unmasked native sorting contains every real (token, slot) once.
+            # Unmasked native sorting contains every real (token, slot) once, so
+            # every inverse entry is written; no -1 prefill is needed.
             inverse = torch.empty(
                 (problem.batch, problem.topk), dtype=torch.int32, device=output.device
             )
@@ -1011,7 +1026,7 @@ def run_flydsl_moe_gfx942(
     config_string: str,
     swiglu_limit: float | None = None,
 ) -> torch.Tensor:
-    architecture = get_gfx()
+    architecture = get_gfx_runtime()
     if quant_type == QuantType.per_128x128:
         quant_type = QuantType.per_1x128
     # num_local_tokens: rows at and past it (CUDA-graph padding) run no route
@@ -1021,7 +1036,7 @@ def run_flydsl_moe_gfx942(
         isinstance(num_local_tokens, torch.Tensor) and num_local_tokens.is_cuda
     ):
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend takes num_local_tokens as a CUDA tensor"
+            "FlyDSL whole-graph MoE backend takes num_local_tokens as a CUDA tensor"
         )
     for name, tensor in (
         ("hidden_states", hidden_states),
@@ -1034,7 +1049,7 @@ def run_flydsl_moe_gfx942(
     ):
         if tensor is not None and not tensor.is_contiguous():
             raise NotImplementedError(
-                f"gfx942 FlyDSL whole-graph backend requires contiguous {name}"
+                f"FlyDSL whole-graph MoE backend requires contiguous {name}"
             )
     config = Config.from_string(config_string)
     is_blockscale = config.is_blockscale_prefill or config.is_blockscale_decode
@@ -1068,7 +1083,7 @@ def run_flydsl_moe_gfx942(
         or activation not in (ActivationType.Silu, ActivationType.Swiglu)
         or not (is_bf16 or is_fp8)
     ):
-        raise RuntimeError("Unsupported input for the gfx942 FlyDSL MoE backend")
+        raise RuntimeError("Unsupported input for the FlyDSL MoE backend")
     if is_fp8 and (w1_scale is None or w2_scale is None):
         raise ValueError("FP8 weights require both w1_scale and w2_scale")
     if is_bf16 and (w1_scale is not None or w2_scale is not None):
@@ -1093,8 +1108,7 @@ def run_flydsl_moe_gfx942(
     unsupported_reason = config.unsupported_reason(problem)
     if unsupported_reason is not None:
         raise RuntimeError(
-            f"Unsupported gfx942 FlyDSL MoE config {config_string!r}: "
-            f"{unsupported_reason}"
+            f"Unsupported FlyDSL MoE config {config_string!r}: {unsupported_reason}"
         )
     if is_blockscale:
         _validate_blockscale_inputs(
@@ -1170,7 +1184,7 @@ def run_flydsl_moe_gfx942_impl(
     config_string: str,
 ) -> torch.Tensor:
     config = Config.from_string(config_string)
-    architecture = get_gfx()
+    architecture = get_gfx_runtime()
     if architecture not in ("gfx942", "gfx950"):
         raise NotImplementedError(
             f"Unsupported FlyDSL MoE architecture: {architecture}"
@@ -1186,39 +1200,40 @@ def run_flydsl_moe_gfx942_impl(
         and getattr(request.w2, "is_shuffled", False)
     ):
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend requires preshuffled weights"
+            "FlyDSL whole-graph MoE backend requires preshuffled weights"
         )
     if request.bias1 is not None or request.bias2 is not None:
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend does not support per-expert bias"
+            "FlyDSL whole-graph MoE backend does not support per-expert bias"
         )
     if request.doweight_stage1:
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend does not support doweight_stage1=True"
+            "FlyDSL whole-graph MoE backend does not support doweight_stage1=True"
         )
     if request.a1_scale is not None or request.a2_scale is not None:
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend does not support prequantized activations"
+            "FlyDSL whole-graph MoE backend does not support prequantized activations"
         )
     if request.hidden_pad or request.intermediate_pad:
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend does not support hidden/intermediate padding"
+            "FlyDSL whole-graph MoE backend does not support hidden/intermediate "
+            "padding"
         )
     if request.gate_mode not in (None, "separated"):
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend only supports separated gate weights"
+            "FlyDSL whole-graph MoE backend only supports separated gate weights"
         )
     if request.dtype not in (None, request.hidden_states.dtype):
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend does not support output dtype conversion"
+            "FlyDSL whole-graph MoE backend does not support output dtype conversion"
         )
     if request.block_size_m not in (None, config.BLOCK_M):
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend does not support overriding block_size_m"
+            "FlyDSL whole-graph MoE backend does not support overriding block_size_m"
         )
     if request.ksplit != 0:
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph backend does not support split-K"
+            "FlyDSL whole-graph MoE backend does not support split-K"
         )
     quant_dtype = (
         torch.bfloat16
@@ -1231,11 +1246,11 @@ def run_flydsl_moe_gfx942_impl(
         supported_q_dtypes_a += (torch.bfloat16,)
     if request.q_dtype_a not in supported_q_dtypes_a:
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph activation dtype must match the weight mode"
+            "FlyDSL whole-graph MoE activation dtype must match the weight mode"
         )
     if request.q_dtype_w not in (None, quant_dtype):
         raise NotImplementedError(
-            "gfx942 FlyDSL whole-graph weight dtype must match the weight mode"
+            "FlyDSL whole-graph MoE weight dtype must match the weight mode"
         )
     return run_flydsl_moe_gfx942(
         request.hidden_states,

@@ -15,11 +15,9 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import rocdl as rocdl_dialect
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.math import fma
 from flydsl.expr.meta import dsl_loc_tracing
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.typing import as_ir_value
 from flydsl.expr.utils.arith import _to_raw as _raw
 
 from aiter.jit.utils.chip_info import get_cu_num, get_gfx_runtime
@@ -139,64 +137,6 @@ class LdsTensor(fx.Tensor):
     @dsl_loc_tracing
     def store(self, vector, *, address_bytes, copy_atom, offset_bytes=0):
         fx.copy(copy_atom, vector, self._at(address_bytes, offset_bytes))
-
-
-def eltwise_op(inst_name, *args):
-    """Keep the explicit f32 instruction order of the blockscale Down pipeline."""
-    from flydsl._mlir.dialects import vector as vector_dialect
-    from flydsl._mlir.ir import F32Type, VectorType
-
-    def get_size(raw):
-        return raw.type.shape[0] if isinstance(raw.type, VectorType) else 1
-
-    def get_item(raw, index):
-        if isinstance(raw.type, VectorType):
-            return vector_dialect.extract(
-                raw, static_position=[index], dynamic_position=[]
-            )
-        return raw
-
-    raw_args = []
-    size = 1
-    constraints = "=v"
-    instruction = f"{inst_name} $0"
-    for index, source in enumerate(args):
-        raw = as_ir_value(source)
-        raw_args.append(raw)
-        vector_width = get_size(raw)
-        assert vector_width == 1 or vector_width == size or size == 1
-        size = max(size, vector_width)
-        instruction += f", ${index + 1}"
-        constraints += ",v"
-
-    f32 = F32Type.get()
-    if inst_name.startswith("llvm."):
-        outputs = [
-            llvm.call_intrinsic(
-                f32,
-                inst_name,
-                [get_item(raw, index) for raw in raw_args],
-                [],
-                [],
-            )
-            for index in range(size)
-        ]
-    else:
-        outputs = [
-            llvm.inline_asm(
-                f32,
-                [get_item(raw, index) for raw in raw_args],
-                instruction,
-                constraints,
-                has_side_effects=False,
-            )
-            for index in range(size)
-        ]
-    if size > 1:
-        return fx.Vector(
-            vector_dialect.from_elements(VectorType.get([size], f32), outputs)
-        )
-    return outputs[0]
 
 
 def validate_gemm_options(
@@ -732,29 +672,35 @@ class FlyObjCache:
 
 
 def pin_vgpr(value):
-    """Pin a numeric scalar or vector to VGPRs with tied empty asm."""
+    """Pin a numeric scalar or vector to VGPRs with tied empty asm.
+
+    The side-effecting asm is opaque to LLVM, so a pinned value is neither
+    rematerialized nor sunk next to its use: precomputed store/LDS addresses
+    stay out of the MFMA loops and loaded operands stay where they were issued.
+    Without the pins the gfx950 M128 Down needs 6-13 more VGPRs (e.g. 198 ->
+    208 for N4096/OC8 persistent, 183 -> 196 for OC4 independent).
+    """
     raw = value.ir_value()
     result = llvm.inline_asm(raw.type, [raw], "", "=v,0", has_side_effects=True)
     if isinstance(raw.type, ir.VectorType):
         return fx.Vector(result)
     return fx.Numeric.from_ir_type(raw.type)(result)
 
-def llvm_extract_as_vector(element_type, *args):
-    elements = []
-    current_vec = None
 
-    for arg in args:
-        if isinstance(arg, (list, tuple)):
-            assert current_vec is not None
-            elements.append(
-                element_type(
-                    llvm.extractvalue(element_type.ir_type, current_vec, arg)
-                )
-            )
-        else:
-            current_vec = arg
+def permlane16_swap(old, src):
+    """Return the two i32 results of v_permlane16_swap(old, src).
 
-    return fx.Vector.from_elements(elements, element_type)
+    FlyDSL 0.5.0 exposes only the raw ROCDL op, which returns an LLVM struct.
+    """
+    i32 = fx.Int32.ir_type
+    pair = rocdl.permlane16_swap(
+        llvm.StructType.get_literal([i32, i32]),
+        fx.Int32(old).ir_value(),
+        fx.Int32(src).ir_value(),
+        False,
+        False,
+    )
+    return tuple(fx.Int32(llvm.extractvalue(i32, pair, [i])) for i in range(2))
 
 
 def asm_mark(mark: str):
@@ -847,6 +793,8 @@ def make_gemm_helpers(
     """Build the shared gather/scatter and split-K helpers without tracing IR."""
     # Compile-time specialization; gfx942 uses the existing K16 BF16 MMA and
     # exact FP8 -> FP32 -> BF16 conversion. Scale/FMA and K64 steps are shared.
+    # Offline AOT replay (AITER_AOT_REPLAY=1) makes get_gfx_runtime() return the
+    # GPU_ARCHS target, so a gfx942 build on a gfx950 host picks the gfx942 path.
     native_block_fp8 = weight_quant_type == "block" and get_gfx_runtime() == "gfx950"
 
     class TensorWithIndex:
@@ -1158,7 +1106,7 @@ def make_gemm_helpers(
                     part = block_c_frag[None, n, m].load()
                     total = c_frag[None, n, m].load()
                     scale = Vec.filled(part.numel, scales[n], fx.Float32)
-                    c_frag[None, n, m].store(Vec(fma(part, scale, total)))
+                    c_frag[None, n, m].store(Vec(fx.fma(part, scale, total)))
 
         def _prefetch_a(k_idx, buf):
             if const_expr(a_with_index):
@@ -1370,15 +1318,20 @@ def make_gemm_helpers(
 
     return TensorWithIndex, _read_sorted_index, gemm_splitk
 
+
 def rocdl_aux(value=0):
     return ir.IntegerAttr.get(fx.Int32.ir_type, value)
 
+
+def _scalar(value):
+    """Broadcast lane 0's Int32 to an SGPR (v_readfirstlane_b32)."""
+    return fx.Int32(rocdl.readfirstlane(fx.Int32.ir_type, value.ir_value()))
+
+
 def get_device_cache_key():
-    device = torch.cuda.current_device()
-    properties = torch.cuda.get_device_properties(device)
-    return (
-        device,
-        properties.name,
-        properties.gcnArchName,
-        properties.multi_processor_count,
-    )
+    """Key compiled handles by device: a handle does not launch on another GPU.
+
+    The architecture is not part of the key; aiter assumes a homogeneous node
+    and the compile functions check get_gfx_runtime().
+    """
+    return torch.cuda.current_device()

@@ -59,7 +59,7 @@ from aiter.jit.core import (
     AITER_ROOT_DIR,
     get_asm_dir,
 )
-from aiter.jit.utils.chip_info import get_gfx, gfx_from_cu_num
+from aiter.jit.utils.chip_info import get_gfx, get_gfx_runtime, gfx_from_cu_num
 from aiter.ops.flydsl.moe_common import (
     DEFAULT_SITUV2_BETA,
     DEFAULT_SITUV2_LINEAR_BETA,
@@ -164,6 +164,7 @@ def _expert_balanced_score(token, expert, topk, dtype, device=None):
     score = torch.zeros((token, expert), dtype=dtype, device=device)
     return score.scatter_(1, cols, 1.0)
 
+
 COS_DIFF_THRESHOLD = 1e-1
 
 
@@ -222,7 +223,7 @@ def _flydsl_e2e_row_supported(config, row) -> bool:
         # Keep the existing non-blockscale candidate eligibility unchanged.
         # block_a16w8 deliberately keeps BF16 activations. It competes against
         # the same A8W8 reference and tolerance, not a substituted reference.
-        architecture = get_gfx()
+        architecture = get_gfx_runtime()
         if architecture not in ("gfx942", "gfx950") or (
             config.is_blockscale_prefill and architecture != "gfx950"
         ):
@@ -6705,7 +6706,7 @@ class FmoeTuner(TunerCommon):
             err1 = "0%"
             err2 = "0%"
             kernelName1 = make_fused_moe_impl_kernel_name(
-                f"flydsl_{get_gfx()}", config_string
+                f"flydsl_{get_gfx_runtime()}", config_string
             )
             kernelName2 = ""
             xbf16 = 0

@@ -75,7 +75,7 @@ def _load_cpu_code():
         os=os,
         pd=pd,
         torch=torch,
-        get_gfx=lambda: "gfx950",
+        get_gfx_runtime=lambda: "gfx950",
         ActivationType=SimpleNamespace(Silu="ActivationType.Silu"),
         QuantType=SimpleNamespace(
             **{
@@ -120,7 +120,12 @@ def _load_cpu_code():
 
     load(
         "aiter/ops/flydsl/kernels/moe_gemm_2stage/gfx9_fp8/a8w8_blockscale_config.py",
-        {"m128_down_lds_bytes", "routed_down_lds_bytes"},
+        {
+            "GFX950_LDS_BYTES",
+            "m128_down_lds_bytes",
+            "routed_down_lds_bytes",
+            "prefill_buffer_reason",
+        },
     )
     load(
         "aiter/ops/flydsl/fused_moe_gfx942.py",
@@ -175,9 +180,7 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
     def test_block_aliases_and_valid_shapes(self):
         shapes = (
             ("block_m128", 128, 256),
-            ("block_m128", 128, 512),
             ("block_m128_persistent", 128, 256),
-            ("block_m128_persistent", 128, 512),
             ("block_8wave", 32, 128),
             ("block_8wave", 64, 512),
             ("block_8wave", 128, 256),
@@ -234,6 +237,9 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
                 )
 
     def test_n_split_and_lds_rejections_use_config(self):
+        # MiMo-V2.6-Pro TP8 at 32768 tokens: the packed M128 output exceeds
+        # 4 GiB, the routed 8-wave output does not.
+        large = {"token": 32768, "model_dim": 6144, "expert": 384, "topk": 8}
         cases = (
             ("block_m128", 128, 4, {"model_dim": 768}, "num_oc_splits"),
             ("block_m128_persistent", 128, 4, {"model_dim": 768}, "num_oc_splits"),
@@ -241,7 +247,10 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
             ("block_8wave", 128, 1, {"inter_dim": 512}, "LDS"),
             ("block_m128", 128, 1, {"model_dim": 2**21}, "LDS"),
             ("block_m128_persistent", 128, 1, {"model_dim": 2**21}, "LDS"),
-            ("block_m128", 128, 1, {"inter_dim": 128}, "multiple of256"),
+            ("block_m128", 128, 1, {"inter_dim": 128}, "K=256"),
+            ("block_m128_persistent", 128, 1, {"inter_dim": 512}, "K=256"),
+            ("block_m128_persistent", 128, 2, large, "packed Down output"),
+            ("block_8wave", 128, 1, {**large, "token": 65536}, "routed Down output"),
         )
         for quant, (path, block_n, splits, change, reason) in product(
             _BLOCK_QUANTS, cases
@@ -292,7 +301,7 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
         for gfx in ("gfx942", "gfx950", "gfx1250"):
             with (
                 self.subTest(gfx=gfx),
-                mock.patch.object(self.code, "get_gfx", return_value=gfx),
+                mock.patch.object(self.code, "get_gfx_runtime", return_value=gfx),
             ):
                 configs = [
                     self.code.Config.from_string(text)
@@ -306,7 +315,9 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
                     )
                     self.assertEqual({c.num_oc_splits for c in block}, {1, 2, 4, 8})
                     # Every Down candidate is tuned with and without stage1 K rotation.
-                    down = {(c.down_path, c.down_block_n, c.num_oc_splits) for c in block}
+                    down = {
+                        (c.down_path, c.down_block_n, c.num_oc_splits) for c in block
+                    }
                     self.assertEqual(
                         sorted(
                             (c.down_path, c.down_block_n, c.num_oc_splits, c.k_rotate)
@@ -360,7 +371,7 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
 
     def test_decode_candidates_and_shape_bounds(self):
         for gfx in ("gfx942", "gfx950", "gfx1250"):
-            with mock.patch.object(self.code, "get_gfx", return_value=gfx):
+            with mock.patch.object(self.code, "get_gfx_runtime", return_value=gfx):
                 configs = [
                     self.code.Config.from_string(s) for s in self.code.get_tune_space()
                 ]
@@ -374,7 +385,7 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
             ):
                 with (
                     self.subTest(gfx=gfx, config=config, token=token, quant=quant),
-                    mock.patch.object(self.code, "get_gfx", return_value=gfx),
+                    mock.patch.object(self.code, "get_gfx_runtime", return_value=gfx),
                 ):
                     self.assertFalse(config.is_blockscale_prefill)
                     self.assertEqual(len(config.to_string().split(":")), 3)
@@ -439,7 +450,7 @@ class TestFlydslBlockscaleTuning(unittest.TestCase):
         ):
             with (
                 self.subTest(gfx=gfx, dtype_a=dtype_a, dtype_w=dtype_w, quant=quant),
-                mock.patch.object(self.code, "get_gfx", return_value=gfx),
+                mock.patch.object(self.code, "get_gfx_runtime", return_value=gfx),
             ):
                 dtype = (
                     torch.float8_e4m3fn if gfx == "gfx950" else torch.float8_e4m3fnuz

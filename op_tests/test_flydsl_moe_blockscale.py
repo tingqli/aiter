@@ -12,7 +12,7 @@ import aiter
 from aiter import ActivationType, QuantType
 from aiter.fused_moe import torch_moe_stage1, torch_moe_stage2
 from aiter.fused_moe_registry import FusedMoeRequest
-from aiter.jit.utils.chip_info import get_gfx
+from aiter.jit.utils.chip_info import get_gfx_runtime
 from aiter.ops.flydsl.fused_moe_gfx942 import (
     Config,
     _Problem,
@@ -147,7 +147,14 @@ def check_result(reference, result, label):
     assert err <= 0.05, f"{label}: err_ratio={err}"
     denominator = (ref.square().sum() + out.square().sum()).clamp_min(1e-30)
     diff = ((ref - out).square().sum() / denominator).item()
-    assert diff < 0.01, f"{label}: normalized squared diff={diff}"
+    assert diff < 1e-4, f"{label}: normalized squared diff={diff}"
+    # A single wrong or unwritten row is a tiny fraction of all elements, so
+    # also bound each row (the blockscale suites measure at most ~1.2e-2).
+    ref_rows, out_rows = ref.flatten(0, -2), out.flatten(0, -2)
+    row_err = (ref_rows - out_rows).norm(dim=-1) / (
+        ref_rows.norm(dim=-1) + out_rows.norm(dim=-1)
+    ).clamp_min(1e-30)
+    assert row_err.max() < 0.05, f"{label}: worst row error={row_err.max().item()}"
     return err
 
 
@@ -201,7 +208,7 @@ def test_blockscale_perf(tokens, hidden, inter, experts, topk):
         )
         + tokens * hidden * 2
     )
-    ret = {"gfx": get_gfx()}
+    ret = {"gfx": get_gfx_runtime()}
     for name, run in candidates.items():
         check_result(reference, run(), name)
         out, us = run_perftest(run, num_warmup=2, num_iters=10)
@@ -223,7 +230,7 @@ test_blockscale_perf.__test__ = False
 
 
 def main():
-    if get_gfx() != "gfx950":
+    if get_gfx_runtime() != "gfx950":
         aiter.logger.warning("FP8 blockscale FlyDSL requires gfx950; skipping")
         return
     parser = argparse.ArgumentParser(description=__doc__)

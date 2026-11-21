@@ -12,8 +12,7 @@ from flydsl.expr import range_constexpr, rocdl
 
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled
 
-from .common import _ptr, get_device_cache_key, rocdl_aux
-from .a8w8_blockscale_gemm2 import _scalar
+from .common import _ptr, _scalar, get_device_cache_key, rocdl_aux
 
 
 @cache
@@ -108,64 +107,55 @@ def _compile_moe_sum(device_key, n, topk, sort_block_m):
 def make_moe_sum(*, n, topk, sort_block_m=256):
     """Gather packed routes through inverse; sort_block_m is the packed stride.
 
-    Pass 128 for M128 output even when the routing metadata was sorted by256.
-    Missing inverse entries contribute zero. No tensors are retained in caches.
+    Pass 128 for M128 output even when the routing metadata was sorted by 256.
+    inverse[token, slot] is the route's packed source row. Entries outside
+    [0, source_rows) contribute zero; any other value is read as a route, so
+    the caller must write every (token, slot) or prefill inverse with -1.
+    No tensors are retained in caches.
     """
-    assert n > 0 and n % 128 == 0 and 0 < topk <= 255
-    assert sort_block_m in (128, 256)
-    assert sort_block_m * n * 2 < (
-        1 << 32
-    ), "one packed M block must fit a buffer descriptor"
+    if not (n > 0 and n % 128 == 0 and 0 < topk <= 255):
+        raise ValueError("moe_sum requires N divisible by 128 and 0 < TOPK <= 255")
+    if sort_block_m not in (128, 256):
+        raise ValueError("moe_sum requires sort_block_m 128 or 256")
+    if sort_block_m * n * 2 >= 1 << 32:
+        raise ValueError("one packed M block must fit a buffer descriptor")
 
     def reduce(output, source, inverse):
-        assert output.ndim == 2 and output.shape[1] == n
-        tokens = output.shape[0]
-        assert (
-            source.ndim == 2
-            and source.shape[1] == n
-            and source.shape[0] % sort_block_m == 0
-        )
-        assert inverse.shape == (tokens, topk)
-        assert (
-            source.dtype == output.dtype == torch.bfloat16
-            and inverse.dtype == torch.int32
-        )
-        assert all(
+        if not all(
             t.is_cuda and t.is_contiguous() and t.device == output.device
             for t in (output, source, inverse)
-        )
-        assert source.shape[0] < (1 << 31) and output.numel() * 2 < (1 << 32)
+        ):
+            raise ValueError("moe_sum tensors must be contiguous on one GPU")
+        if (
+            source.dtype != torch.bfloat16
+            or output.dtype != torch.bfloat16
+            or inverse.dtype != torch.int32
+        ):
+            raise ValueError("moe_sum expects BF16 source/output and int32 inverse")
+        if output.ndim != 2 or output.shape[1] != n:
+            raise ValueError("moe_sum output must be [tokens, N]")
+        tokens = output.shape[0]
+        if (
+            source.ndim != 2
+            or source.shape[1] != n
+            or source.shape[0] % sort_block_m
+            or inverse.shape != (tokens, topk)
+        ):
+            raise ValueError("moe_sum source/inverse shape mismatch")
+        if source.shape[0] >= 1 << 31 or output.numel() * 2 >= 1 << 32:
+            raise ValueError("moe_sum buffers must fit 32-bit byte offsets")
         with torch.cuda.device(output.device):
             launcher = _compile_moe_sum(get_device_cache_key(), n, topk, sort_block_m)
             stream = torch.cuda.current_stream(output.device)
-            compiled = getattr(launcher, "_cf", None)
-            if compiled is None:
-                _run_compiled(
-                    launcher,
-                    _ptr(output),
-                    _ptr(source),
-                    _ptr(inverse),
-                    fx.Int32(tokens),
-                    fx.Int32(source.shape[0]),
-                    fx.Stream(stream.cuda_stream),
-                )
-            else:
-                compiled(
-                    output.data_ptr(),
-                    source.data_ptr(),
-                    inverse.data_ptr(),
-                    tokens,
-                    source.shape[0],
-                    stream.cuda_stream,
-                )
+            _run_compiled(
+                launcher,
+                _ptr(output),
+                _ptr(source),
+                _ptr(inverse),
+                fx.Int32(tokens),
+                fx.Int32(source.shape[0]),
+                fx.Stream(stream.cuda_stream),
+            )
         return output
 
-    reduce.config = {
-        "output_layout": "packed",
-        "sort_block_m": sort_block_m,
-        "num_threads": 256,
-        "block_cols": 2048,
-        "read_policy": 2,
-        "write_policy": 0,
-    }
     return reduce

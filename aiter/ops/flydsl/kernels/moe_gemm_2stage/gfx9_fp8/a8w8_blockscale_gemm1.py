@@ -2,36 +2,18 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 """gfx950 W128x128/A1x128 FP8 GateUp with BF16 routed output.
 
-Kernel synced from the optimized standalone test_fp8_stage1_giu1.py: 8-wave,
-256x256, half-M single-FIFO pipeline with optional K rotation. Weights use
-Aiter's shuffle_weight(16,16), with gate rows followed by up rows. Scales are
-FP32: A is physically [K/128, tokens], B is [E, 2*I/128, K/128]. Each task
-consumes 256 sorted rows and produces 128 columns of SiLU(gate) * up, without
-clamp or routing weights. A block whose bottom 128 rows hold no route runs a
-128-row pipeline instead (same DMA/LDS/DOT helpers, M128 phase order).
+8-wave, 256x256, half-M single-FIFO pipeline with optional K rotation.
+Weights use Aiter's shuffle_weight(16,16), with gate rows followed by up rows.
+Scales are FP32: A is physically [K/128, tokens], B is [E, 2*I/128, K/128].
+Each task consumes 256 sorted rows and produces 128 columns of SiLU(gate) * up,
+without clamp or routing weights. A block whose bottom 128 rows hold no route
+runs a 128-row pipeline instead (same DMA/LDS/DOT helpers, M128 phase order).
 A persistent grid (at most one workgroup per CU) walks (block, N tile) tasks
 round-robin; the last two K tiles of each task prefetch the next task's first
 two through the two-slot LDS ring, so DMA streams across task boundaries.
 Sorting capacity may exceed the valid padded prefix: tasks are counted from
 num_valid_ids[0] on device and blocks past it are never read.
 """
-
-# Changes vs the baseline GateUp (23ca84c6: BM256 only, one task per workgroup).
-# Comments tagged [step 1] / [step 2] mark where each change lives.
-#   [step 1] 3bc0b504, per-block dual pipeline: sorted row 128 picks the BM256
-#            pipeline (full_tile) or a 128-row pipeline (half_tile, new) that
-#            skips the empty bottom half's A DMAs, MFMAs and stores.
-#   [step 2] e2d11fe0, persistent dual pipeline: at most one workgroup per CU
-#            walks (block, N tile) tasks; cross-task prefetch (tile_refs), LDS
-#            routing ring, unconditional output stores, batch rotation.
-#   New helpers: task_context, task_coords, tile_refs, full_tile, half_tile,
-#     drain, route_valid, load_route, store_route, route_load, read_store_ids,
-#     output_store, store_placeholders, _cu_count.
-#   Now take a task context ctx: k_tile, raw_g2s_a, raw_g2s_b, async_copy_*,
-#     load_scale_b, store_gate_up (+store_ids). New arguments: num_workers
-#     (kernel, launch_stage1), persistent (fp8_blockscale_stage1).
-#   Removed: sorted_id (global sorted-ID reads -> LDS routing ring) and
-#     tile_soffset (past-the-end K-tile checks -> next-task prefetch).
 
 import functools
 
@@ -40,14 +22,15 @@ import flydsl.expr as fx
 import torch
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Float8E4M3FN, Float32, T
 from flydsl.expr.typing import Vector as Vec
 
+from aiter.jit.utils.chip_info import get_cu_num, get_gfx_runtime
+from aiter.ops.flydsl.kernels.act import silu_mul_batch
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled
 
-from .common import get_device_cache_key
+from .common import get_device_cache_key, permlane16_swap, rocdl_aux
 
 SORT_BLOCK_M = 256
 BLOCK_M = 128
@@ -56,8 +39,10 @@ BLOCK_K = 128
 TOKEN_MASK = 0xFFFFFF
 ROUTE_WORDS = SORT_BLOCK_M + 64
 BUFFER_LIMIT = 0x7FFFFFFF
-# As an unsigned voffset this is past every buffer below 4 GiB, so loads return 0.
-OOB_OFFSET = -1
+# Unsigned voffset 0xFFFFFFF0 is 16-byte aligned, so a DWORDx4 access there
+# ends at 2**32 - 1 without wrapping. validate_parameters keeps every extent at
+# or below it, so the access is out of range: loads return 0, stores are dropped.
+OOB_OFFSET = -16
 
 
 def validate_parameters(tokens, intermediate_size, hidden_size, topk, num_experts):
@@ -69,16 +54,20 @@ def validate_parameters(tokens, intermediate_size, hidden_size, topk, num_expert
         raise ValueError("hidden_size must be a multiple of 256 and at least 256")
     if not 0 < topk < 256 or num_experts < topk:
         raise ValueError("require 0 < topk < 256 and num_experts >= topk")
-    # Buffer descriptors hold a 32-bit byte count.
+    # Buffer descriptors hold a 32-bit byte count, which may not exceed the
+    # out-of-range voffset.
     extents = {
         "a (tokens*K)": tokens * hidden_size,
         "a_scale (tokens*K/128*4)": tokens * (hidden_size // 128) * 4,
         "output (tokens*topk*I*2)": tokens * topk * intermediate_size * 2,
         "weight per expert (2*I*K)": 2 * intermediate_size * hidden_size,
     }
-    over = [f"{name}={size:,}" for name, size in extents.items() if size >= 2**32]
+    limit = 2**32 + OOB_OFFSET
+    over = [f"{name}={size:,}" for name, size in extents.items() if size > limit]
     if over:
-        raise ValueError("buffer byte extents must be < 4 GiB: " + ", ".join(over))
+        raise ValueError(
+            f"buffer byte extents must be <= {limit:,} bytes: " + ", ".join(over)
+        )
 
 
 def _buffer_resource(tensor, num_records_bytes, base_byte_offset=0):
@@ -146,16 +135,19 @@ def compile_fp8_stage1_giu1(
     b_group16 = 16 * BLOCK_K
     b_lds_elems = (BLOCK_N // 16) * b_group16
 
-    # [step 2] Odd per-batch task rotation for persistent workers (see _get_pids).
+    # Odd per-batch task rotation for persistent workers (see get_pids).
     batch_rotation = 37 * group_size_m * n_tiles % 256
 
-    def _get_pids(pid, m_tiles, grid_size):
+    # flyc.jit gives this plain helper's runtime `if` an scf.if when it is
+    # traced inside the kernel.
+    @flyc.jit
+    def get_pids(pid, m_tiles, grid_size):
         if const_expr(xcd_swizzle):
             # Match bounded XCD batches without scattering adjacent experts
             # over the full grid. Leave the incomplete final batch linear.
             full_batches = grid_size - grid_size % 256
             if pid < full_batches:
-                # [step 2] A persistent worker takes one task per batch.
+                # A persistent worker takes one task per batch.
                 # Rotating batch b by an odd block count times b varies which
                 # blocks (full or half) a worker gets, e.g. when experts
                 # alternate them.
@@ -172,8 +164,6 @@ def compile_fp8_stage1_giu1(
             first_m + (pid % (group_size_m * n_tiles)) % group_m,
             (pid % (group_size_m * n_tiles)) // group_m,
         )
-
-    get_pids = ASTRewriter.transform(_get_pids)
 
     @fx.struct
     class LDS:
@@ -200,7 +190,7 @@ def compile_fp8_stage1_giu1(
         # Both compute M slices share these entries; do not split the scales.
         scale_a0: fx.Array[Float32, 512, 4]
         scale_a1: fx.Array[Float32, 512, 4]
-        # [step 2] Task routing ring (task index mod 3): 256 sorted IDs, then 64
+        # Task routing ring (task index mod 3): 256 sorted IDs, then 64
         # copies of the task's expert ID. Task t + 1 is fetched at task t's start
         # into the buffer task t - 2 finished reading a whole task earlier.
         route: fx.Array[fx.Int32, 3 * ROUTE_WORDS, 4]
@@ -217,7 +207,7 @@ def compile_fp8_stage1_giu1(
         arg_c: fx.Tensor,
         num_tokens: fx.Int32,
         num_expert_blocks: fx.Int32,
-        num_workers: fx.Int32,  # [step 2] new: persistent grid size
+        num_workers: fx.Int32,  # persistent grid size
     ):
         tid = fx.thread_idx.x
         lane_id = tid % 64
@@ -233,7 +223,7 @@ def compile_fp8_stage1_giu1(
         valid_rows = rocdl.raw_ptr_buffer_load(
             T.i32, prefix_rsrc, fx.Int32(0), fx.Int32(0)
         )
-        valid_rows = fx.Int32(rocdl.readfirstlane(T.i32, arith._to_raw(valid_rows)))
+        valid_rows = fx.Int32(rocdl.readfirstlane(T.i32, valid_rows))
         # Aiter passes full-capacity sort buffers: only the valid prefix holds
         # routes and blocks past it may carry arbitrary expert IDs, so tasks are
         # counted from it on device. num_expert_blocks sizes the descriptors.
@@ -241,15 +231,15 @@ def compile_fp8_stage1_giu1(
         valid_blocks = (valid_blocks < num_expert_blocks).select(
             valid_blocks, num_expert_blocks
         )
-        # [step 2] Tasks = valid blocks x N tiles (baseline: one workgroup per task).
+        # Tasks = valid blocks x N tiles.
         num_tasks = valid_blocks * n_tiles
         if worker < num_tasks:
             sorted_rsrc = _buffer_resource(
                 arg_sorted_ids,
-                arith._to_raw(fx.Int32(num_expert_blocks * SORT_BLOCK_M * 4)),
+                fx.Int32(num_expert_blocks * SORT_BLOCK_M * 4).ir_value(),
             )
             expert_rsrc = _buffer_resource(
-                arg_expert_ids, arith._to_raw(fx.Int32(num_expert_blocks * 4))
+                arg_expert_ids, fx.Int32(num_expert_blocks * 4).ir_value()
             )
             a_rsrc = _buffer_resource(arg_a, fx.Int64(num_tokens) * hidden_size)
             scale_a_rsrc = _buffer_resource(
@@ -325,14 +315,14 @@ def compile_fp8_stage1_giu1(
             p_tile = fx.flat_divide(c_tile, (BLOCK_N, 64))[None, None, 0, 0]
             frag_p = thread_mma.make_fragment_C(p_tile)
 
-            # [step 2] new: shared (token, slot) validity test of a fused sorted ID.
+            # Shared (token, slot) validity test of a fused sorted ID.
             def route_valid(fused):
                 slot = (fused >> 24) & 255
                 return ((fused & TOKEN_MASK) < num_tokens) & (slot < topk)
 
-            # [step 2] Routing of one task (256 sorted IDs, then 64 copies of its
-            # expert ID) lives in an LDS ring buffer; route_base is its byte offset.
-            # It replaces the baseline's per-lane global sorted_id() reads. It
+            # Routing of one task (256 sorted IDs, then 64 copies of its
+            # expert ID) lives in an LDS ring buffer; route_base is its word offset.
+            # It replaces per-lane global sorted-ID reads. It
             # is fetched with two VGPR loads per wave (waves w and w + 4 load the
             # same rows, so vmcnt budgets stay wave-uniform) and written to LDS
             # once a pipeline wait has retired them: LLVM tracks those VGPRs
@@ -340,12 +330,12 @@ def compile_fp8_stage1_giu1(
             # before every later routing read.
             route_row = wave_id % 4 * 64 + lane_id
 
-            # [step 2] new: task index -> (sorted block, N tile).
+            # Task index -> (sorted block, N tile).
             def task_coords(v):
                 block_id, n_tile = get_pids(v, valid_blocks, num_tasks)
                 return fx.Int32(block_id), fx.Int32(n_tile)
 
-            # [step 2] new: global -> VGPR routing loads (out of range if invalid).
+            # Global -> VGPR routing loads (out of range if invalid).
             def load_route(v, valid):
                 block_id, _ = task_coords(v)
                 return [
@@ -361,30 +351,26 @@ def compile_fp8_stage1_giu1(
                     )
                 ]
 
-            # [step 2] new: VGPR -> LDS ring write, after a pipeline wait retired it.
+            route_words = fx.make_view(
+                lds.route.ptr, fx.make_layout(3 * ROUTE_WORDS, 1)
+            )
+
+            # VGPR -> LDS ring write, after a pipeline wait retired it.
             def store_route(raw, route_base):
                 for value, row in zip(raw, (route_row, SORT_BLOCK_M + lane_id)):
-                    _llvm.store(
-                        arith._to_raw(fx.Int32(value)),
-                        _lds_byte_ptr(lds.route.ptr, route_base + row * 4),
-                    )
+                    route_words[route_base + row] = fx.Int32(value)
 
-            # [step 2] new: LDS ring read (replaces the baseline's sorted_id()).
+            # LDS ring read of one routing word.
             def route_load(route_base, row):
-                return fx.Int32(
-                    _llvm.load(
-                        T.i32, _lds_byte_ptr(lds.route.ptr, route_base + row * 4)
-                    )
-                )
+                return route_words[route_base + row]
 
             # One cooperative DWORDx4 DMA covers one complete A64xK128 entry.
             # Within an entry r = wave_id//2 + 4*(wave_id%2) + 8*(lane_id//8).
             # This is the inverse of the (4,2,8) consumer's padded row mapping.
             a_local_row = wave_id // 2 + (wave_id % 2) * 4 + (lane_id // 8) * 8
 
-            # [step 2] new: per-task state (the baseline built it once per
-            # workgroup). Called for the current task and, in a task's last two
-            # K tiles, for the next one; its "full" flag is the step-1 choice.
+            # Per-task state. Called for the current task and, in a task's last
+            # two K tiles, for the next one; its "full" flag picks the pipeline.
             def task_context(v, route_base, valid=None):
                 """Descriptors and DMA offsets of task v from its LDS routing.
 
@@ -393,16 +379,12 @@ def compile_fp8_stage1_giu1(
                 """
                 block_id, n_tile = task_coords(v)
                 expert = fx.Int32(
-                    rocdl.readfirstlane(
-                        T.i32, arith._to_raw(route_load(route_base, SORT_BLOCK_M))
-                    )
+                    rocdl.readfirstlane(T.i32, route_load(route_base, SORT_BLOCK_M))
                 )
-                # [step 1] Valid routes are a prefix of every 256-row block, so
+                # Valid routes are a prefix of every 256-row block, so
                 # sorted row 128 tells whether the bottom half holds any route.
                 bottom_id = fx.Int32(
-                    rocdl.readfirstlane(
-                        T.i32, arith._to_raw(route_load(route_base, 128))
-                    )
+                    rocdl.readfirstlane(T.i32, route_load(route_base, 128))
                 )
                 b_slab = BLOCK_N * hidden_size
                 b_gate_base = fx.Int64(expert) * (
@@ -410,7 +392,7 @@ def compile_fp8_stage1_giu1(
                 ) + (fx.Int64(n_tile) * b_slab)
                 ctx = {
                     "valid": valid,
-                    "full": route_valid(bottom_id),  # [step 1] BM256 vs 128-row
+                    "full": route_valid(bottom_id),  # BM256 vs 128-row
                     "n_tile": n_tile,
                     "sorted_base": block_id * SORT_BLOCK_M,
                     "k_off": expert % kb_count,
@@ -454,13 +436,9 @@ def compile_fp8_stage1_giu1(
 
             wave_dma_base = rocdl.readfirstlane(
                 T.i32,
-                arith._to_raw(
-                    fx.Int32((wave_id % 2) * a_group8 + (wave_id // 2) * a_group16)
-                ),
+                fx.Int32((wave_id % 2) * a_group8 + (wave_id // 2) * a_group16),
             )
-            scale_dma_base = rocdl.readfirstlane(
-                T.i32, arith._to_raw(fx.Int32(tid * 4))
-            )
+            scale_dma_base = rocdl.readfirstlane(T.i32, fx.Int32(tid * 4))
 
             def operand_dma_ptrs(views):
                 return [
@@ -470,9 +448,7 @@ def compile_fp8_stage1_giu1(
 
             at_dma = operand_dma_ptrs(a_top)
             ab_dma = operand_dma_ptrs(a_bottom)
-            b_wave_base = rocdl.readfirstlane(
-                T.i32, arith._to_raw(fx.Int32(wave_id * b_group16))
-            )
+            b_wave_base = rocdl.readfirstlane(T.i32, fx.Int32(wave_id * b_group16))
 
             def b_dma_ptrs(views):
                 return [_lds_byte_ptr(fx.get_iter(view), b_wave_base) for view in views]
@@ -491,16 +467,15 @@ def compile_fp8_stage1_giu1(
             # B descriptors (task_context), so this voffset is computed once.
             b_voffset = fx.Int32(wave_id * (16 * hidden_size) + lane_id * 16)
 
-            # [step 2] was k_tile(ki): the K rotation follows ctx's expert.
+            # The K rotation follows ctx's expert.
             def k_tile(ctx, ki):
                 if const_expr(not k_rotate):
                     return ki
                 t = ctx["k_off"] + ki
                 return (t < kb_count).select(t, t - kb_count)
 
-            # [step 2] The DMA helpers take ctx (current or next task) instead of
-            # workgroup globals. The baseline's tile_soffset() and its in-loop
-            # past-the-end check are gone: the last two K tiles prefetch the next
+            # The DMA helpers take ctx (current or next task). There is no
+            # past-the-end K-tile check: the last two K tiles prefetch the next
             # task's tiles 0 and 1 instead (tile_refs).
             # Every DMA helper issues a fixed number of VMEM ops (At/Ab: 1 per M
             # slice, Bl/Br: 2, ScaleA: 1) whether or not its rows are valid.
@@ -515,7 +490,7 @@ def compile_fp8_stage1_giu1(
                     fx.Int32(0),
                 )
 
-            # [step 1] m_slices lets the 128-row pipeline issue one slice per phase.
+            # m_slices lets the 128-row pipeline issue one slice per phase.
             def async_copy_At(ctx, lds_idx, ki, m_slices=(0, 1)):
                 for m_slice in range_constexpr(2):
                     if const_expr(m_slice in m_slices):
@@ -527,7 +502,7 @@ def compile_fp8_stage1_giu1(
                         )
 
             def async_copy_Ab(ctx, lds_idx, ki):
-                # [step 2] A half task's bottom rows are all invalid: these move
+                # A half task's bottom rows are all invalid: these move
                 # no data but keep the VMEM count of every task transition fixed.
                 for m_slice in range_constexpr(2):
                     raw_g2s_a(
@@ -537,7 +512,7 @@ def compile_fp8_stage1_giu1(
             def raw_g2s_b(ctx, rsrc, lds_dst, ki):
                 soffset = fx.Int32(k_tile(ctx, ki) * (BLOCK_K * 16))
                 if const_expr(ctx["valid"] is not None):
-                    # [step 2] No next task (past the last one): out of range.
+                    # No next task (past the last one): out of range.
                     soffset = ctx["valid"].select(soffset, fx.Int32(OOB_OFFSET))
                 for chunk in range_constexpr(2):
                     # The immediate offset advances both the global and the LDS address.
@@ -608,15 +583,15 @@ def compile_fp8_stage1_giu1(
             # LLVM: SITargetLowering::lowerSBuffer() drops the MachineMemOperand,
             # so the backend cannot see the source buffer and inserts extra
             # waitcnts that cost significant performance.
-            # [step 2] was load_scale_b(ki): ScaleB descriptor / N tile from ctx.
+            # ScaleB descriptor and N tile come from ctx.
             def load_scale_b(ctx, ki):
                 offset = fx.Int32((ctx["n_tile"] * kb_count + k_tile(ctx, ki)) * 4)
                 result = _llvm.inline_asm(
                     ir.Type.parse("!llvm.struct<(f32, f32)>"),
                     [
-                        arith._to_raw(ctx["scale_b_rsrc"]),
-                        arith._to_raw(offset),
-                        arith._to_raw(offset + n_tiles * kb_count * 4),
+                        ctx["scale_b_rsrc"],
+                        offset.ir_value(),
+                        (offset + n_tiles * kb_count * 4).ir_value(),
                     ],
                     "s_buffer_load_dword $0, $2, $3\ns_buffer_load_dword $1, $2, $4",
                     "=&s,=&s,s,s,s,~{memory}",
@@ -704,15 +679,7 @@ def compile_fp8_stage1_giu1(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-            pair_type = ir.Type.parse("!llvm.struct<(i32, i32)>")
-
-            def silu_mul(gate, up):
-                exponent = rocdl.exp2(T.f32, arith._to_raw(gate * -1.4426950408889634))
-                inverse = rocdl.rcp(T.f32, 1.0 + exponent)
-                return (gate * inverse) * up
-
-            # [step 2] new: output row IDs from the LDS routing ring (the baseline
-            # issued eight global sorted_id() loads per lane at kernel start).
+            # Output row IDs from the LDS routing ring.
             def read_store_ids(route_base):
                 return [
                     route_load(
@@ -723,18 +690,17 @@ def compile_fp8_stage1_giu1(
                     for repeat in range_constexpr(4)
                 ]
 
-            # [step 2] new: one unconditional DWORDx4 output store.
+            # One unconditional DWORDx4 output store.
             def output_store(packed, offset):
                 rocdl.raw_ptr_buffer_store(
                     packed.ir_value(),
                     c_rsrc,
                     offset.ir_value(),
                     fx.Int32(0).ir_value(),
-                    aux=ir.IntegerAttr.get(T.i32, 0),
+                    aux=rocdl_aux(0),
                 )
 
-            # [step 2] was store_gate_up(gates, ups, bottom) with an `if valid:`
-            # store per row; now ctx + store_ids (from the routing ring).
+            # store_ids come from the routing ring.
             # Every task issues exactly eight output stores (invalid rows go out of
             # range), so the next task's vmcnt budgets see a fixed VMEM count.
             def store_gate_up(ctx, gates, ups, bottom, store_ids):
@@ -749,8 +715,14 @@ def compile_fp8_stage1_giu1(
                     u0, u1 = Vec(ups[None, 0, row_repeat].load()), Vec(
                         ups[None, 1, row_repeat].load()
                     )
-                    v0 = [silu_mul(g0[i], u0[i]) for i in range_constexpr(4)]
-                    v1 = [silu_mul(g1[i], u1[i]) for i in range_constexpr(4)]
+                    v0 = silu_mul_batch(
+                        [g0[i] for i in range_constexpr(4)],
+                        [u0[i] for i in range_constexpr(4)],
+                    )
+                    v1 = silu_mul_batch(
+                        [g1[i] for i in range_constexpr(4)],
+                        [u1[i] for i in range_constexpr(4)],
+                    )
                     # In the transposed C, lane_id % 16 selects the row and the
                     # lane group (lane_id // 16) four consecutive columns.
                     # aX/bX are output columns of N repeat 0/1 (64 apart),
@@ -774,20 +746,10 @@ def compile_fp8_stage1_giu1(
                     p1 = rocdl.cvt_pk_bf16_f32(v0[2], v0[3])
                     p2 = rocdl.cvt_pk_bf16_f32(v1[0], v1[1])
                     p3 = rocdl.cvt_pk_bf16_f32(v1[2], v1[3])
-                    swap0 = rocdl.permlane16_swap(
-                        pair_type, arith._to_raw(p0), arith._to_raw(p2), False, False
-                    )
-                    swap1 = rocdl.permlane16_swap(
-                        pair_type, arith._to_raw(p1), arith._to_raw(p3), False, False
-                    )
+                    swap0 = permlane16_swap(p0, p2)
+                    swap1 = permlane16_swap(p1, p3)
                     packed = Vec.from_elements(
-                        [
-                            fx.Int32(_llvm.extractvalue(T.i32, swap0, [0])),
-                            fx.Int32(_llvm.extractvalue(T.i32, swap1, [0])),
-                            fx.Int32(_llvm.extractvalue(T.i32, swap0, [1])),
-                            fx.Int32(_llvm.extractvalue(T.i32, swap1, [1])),
-                        ],
-                        fx.Int32,
+                        [swap0[0], swap1[0], swap0[1], swap1[1]], fx.Int32
                     )
                     lane_group = lane_id // 16
                     col = (
@@ -801,7 +763,7 @@ def compile_fp8_stage1_giu1(
                     ) * 2
                     output_store(packed, valid.select(address, fx.Int32(OOB_OFFSET)))
 
-            # [step 2] new: a half task's stand-in for the bottom half's stores.
+            # A half task's stand-in for the bottom half's stores.
             def store_placeholders():
                 # Stand in for a bottom half's four stores. Distinct offsets keep
                 # LLVM from merging them; all stay above any < 4 GiB extent.
@@ -810,8 +772,8 @@ def compile_fp8_stage1_giu1(
                         Vec.filled(4, 0, fx.Int32), fx.Int32(OOB_OFFSET - 16 * i)
                     )
 
-            # [step 2] new: the baseline's BM256 K-loop body (8 phases) as one
-            # K tile; ab/ref name the next task's tiles in a task's last two.
+            # One BM256 K tile (8 phases); ab/ref name the next task's tiles in
+            # a task's last two.
             def full_tile(cur, ki, tick, ab, ref, old_a, old_b, hook=None):
                 """Compute BM256 K tile ki of cur from LDS slot tick.
 
@@ -880,9 +842,9 @@ def compile_fp8_stage1_giu1(
                     old_a, old_b = bottom_scale, b_scale[1]
                 return old_a, old_b
 
-            # [step 1] new: 128-row pipeline (M128 L0/R0/L1/R1 phase order) for
-            # blocks whose bottom half is empty: no bottom A DMAs/MFMAs/stores.
-            # [step 2] ab, l1_extra, r1_extra: task-boundary prefetch and waits.
+            # 128-row pipeline (M128 L0/R0/L1/R1 phase order) for blocks whose
+            # bottom half is empty: no bottom A DMAs/MFMAs/stores.
+            # ab, l1_extra, r1_extra: task-boundary prefetch and waits.
             def half_tile(
                 cur, ki, tick, ab, ref, old_a, old_b, l1_extra=0, r1_extra=0, hook=None
             ):
@@ -939,8 +901,8 @@ def compile_fp8_stage1_giu1(
                 end_compute_phase()
                 return scale1, b_scale[1]
 
-            # [step 2] new: the baseline's inline loop drain, shared by both
-            # pipelines (the half pipeline retires into c_tr).
+            # Loop drain shared by both pipelines (the half pipeline retires
+            # into c_tr).
             def drain(c_frag, old_a, old_b):
                 # Retire the final partial (second M slice) into c_frag.
                 for m0 in range_constexpr(2):
@@ -959,7 +921,7 @@ def compile_fp8_stage1_giu1(
                             )
                         )
 
-            # [step 2] new: cross-task prefetch targets (past the last K tile the
+            # Cross-task prefetch targets (past the last K tile the
             # refills come from the next task nxt, not out-of-range soffsets).
             def tile_refs(cur, nxt, k):
                 """(task, tile) of the A-bottom (k+1) and the slot (k+2) refills."""
@@ -967,15 +929,14 @@ def compile_fp8_stage1_giu1(
                 ref = (cur, k + 2) if k + 2 < kb_count else (nxt, k + 2 - kb_count)
                 return ab, ref
 
-            # [step 2] A task's first two and last two K tiles are peeled: the half
+            # A task's first two and last two K tiles are peeled: the half
             # pipeline's tile 0 waits behind the task boundary's VMEM ops and the
             # last two tiles prefetch the next task's tiles 0 and 1 into slots 0
             # and 1. With fewer than four K tiles, tile 0 already prefetches the
             # next task, whose routing must then land first.
             head_tiles = 2 if kb_count >= 4 else 0
-            route_bytes = ROUTE_WORDS * 4
 
-            # [step 2] Prologue: the first task's routing, then its K tiles 0 and 1
+            # Prologue: the first task's routing, then its K tiles 0 and 1
             # in the state a task tail leaves: tile 0 landed, tile 1 in tail order
             # (a full task's tile 1 A bottom comes from its first TL phase).
             store_route(load_route(worker, worker < num_tasks), 0)
@@ -1012,17 +973,17 @@ def compile_fp8_stage1_giu1(
             # stores and the next task's two routing loads, all younger than
             # what the half pipeline's tile 0 waits for.
             boundary_ops = 8 + 2
-            # [step 2] Persistent task loop: worker w runs tasks w, w + W, ...
+            # Persistent task loop: worker w runs tasks w, w + W, ...
             # (W = num_workers; with persistent=False every worker runs one task).
             my_tasks = (num_tasks - worker + num_workers - 1) // num_workers
             for t_index in range(my_tasks):
                 task = worker + t_index * num_workers
-                route_base = t_index % 3 * route_bytes
-                next_base = (t_index + 1) % 3 * route_bytes
+                route_base = t_index % 3 * ROUTE_WORDS
+                next_base = (t_index + 1) % 3 * ROUTE_WORDS
                 cur = task_context(task, route_base)
                 # B0 of tile 0, read one phase ahead (skipped by the last tile).
                 lds_rd_Bl(lds_idx=0)
-                # [step 2] Fetch the next task's routing now; the ring write
+                # Fetch the next task's routing now; the ring write
                 # (keep_route) happens after a pipeline wait has retired it.
                 upcoming = task + num_workers
                 upcoming_valid = upcoming < num_tasks
@@ -1039,7 +1000,7 @@ def compile_fp8_stage1_giu1(
                 frag_p.fill(0)
                 c_tl.fill(0)
                 c_tr.fill(0)
-                # [step 1] Per-block pipeline choice (sorted row 128, task_context).
+                # Per-block pipeline choice (sorted row 128, task_context).
                 if cur["full"]:
                     c_bl.fill(0)
                     c_br.fill(0)
@@ -1073,7 +1034,7 @@ def compile_fp8_stage1_giu1(
                                     f_old_a,
                                     f_old_b,
                                 )
-                    # [step 2] Last two K tiles prefetch the next task's tiles 0/1.
+                    # Last two K tiles prefetch the next task's tiles 0/1.
                     f_nxt = task_context(upcoming, next_base, upcoming_valid)
                     for k in range_constexpr(kb_count - 2, kb_count):
                         ab, ref = tile_refs(cur, f_nxt, k)
@@ -1087,7 +1048,7 @@ def compile_fp8_stage1_giu1(
                     store_gate_up(cur, c_bl, c_br, 1, f_ids)
                     rocdl.sched_barrier(0)
                 else:
-                    # [step 1] 128-row pipeline: the bottom half holds no route.
+                    # 128-row pipeline: the bottom half holds no route.
                     h_old_a = Vec.filled(2, 0.0, Float32)
                     h_old_b = fx.Float32(0)
                     for k in range_constexpr(head_tiles):
@@ -1120,7 +1081,7 @@ def compile_fp8_stage1_giu1(
                                     h_old_a,
                                     h_old_b,
                                 )
-                    # [step 2] Last two K tiles prefetch the next task's tiles 0/1.
+                    # Last two K tiles prefetch the next task's tiles 0/1.
                     h_nxt = task_context(upcoming, next_base, upcoming_valid)
                     for k in range_constexpr(kb_count - 2, kb_count):
                         _, ref = tile_refs(cur, h_nxt, k)
@@ -1141,13 +1102,13 @@ def compile_fp8_stage1_giu1(
                     drain(c_tr, h_old_a, h_old_b)
                     rocdl.sched_barrier(0)
                     store_gate_up(cur, c_tl, c_tr, 0, h_ids)
-                    # [step 2] Keep eight stores per task, like a full task.
+                    # Keep eight stores per task, like a full task.
                     store_placeholders()
                     rocdl.sched_barrier(0)
 
             if wave_id < 4:
                 rocdl.s_barrier()
-            # [step 2] The last task's next-task prefetches are out of range;
+            # The last task's next-task prefetches are out of range;
             # retire them.
             rocdl.s_waitcnt(vmcnt=0)
 
@@ -1163,8 +1124,8 @@ def compile_fp8_stage1_giu1(
         out: fx.Tensor,
         num_tokens: fx.Int32,
         num_expert_blocks: fx.Int32,
-        num_workers: fx.Int32,  # [step 2] new: grid size (persistent workers)
-        stream: fx.Stream = fx.Stream(None),
+        num_workers: fx.Int32,  # grid size (persistent workers)
+        stream: fx.Stream,
     ):
         fp8_stage1_kernel(
             a,
@@ -1186,21 +1147,15 @@ def compile_fp8_stage1_giu1(
 
 
 @functools.cache
-def _cu_count(device):  # [step 2] new: persistent grid size (one worker per CU)
-    return torch.cuda.get_device_properties(device).multi_processor_count
-
-
-@functools.cache
 def _compile_stage1(
     device_key, intermediate_size, hidden_size, topk, num_experts, k_rotate
 ):
-    if device_key is None or device_key[2].split(":")[0] != "gfx950":
+    del device_key  # Cache key only.
+    if get_gfx_runtime() != "gfx950":
         raise ValueError("FP8 blockscale GateUp requires gfx950")
-    launcher = compile_fp8_stage1_giu1(
+    return compile_fp8_stage1_giu1(
         intermediate_size, hidden_size, topk, num_experts, k_rotate=k_rotate
     )
-    launcher.compile_hints["opt_level"] = 2
-    return launcher
 
 
 def fp8_blockscale_stage1(
@@ -1214,7 +1169,7 @@ def fp8_blockscale_stage1(
     output,
     *,
     k_rotate=None,
-    persistent=True,  # [step 2] new; False = one task per workgroup (baseline grid)
+    persistent=True,  # False = one task per workgroup
 ):
     """Write BF16 [tokens, topk, I] on the input device's current stream.
 
@@ -1272,8 +1227,8 @@ def fp8_blockscale_stage1(
     # The valid prefix is 256-row aligned and never exceeds the sort capacity, so
     # a trailing partial capacity block is always inactive and need not launch.
     blocks = min(expert_ids.numel(), sorted_ids.numel() // SORT_BLOCK_M)
-    # The harness enables K rotation for <= 2 valid blocks per expert. The valid
-    # count stays on device, so estimate it from the mean routed rows per expert.
+    # K rotation pays off for <= 2 valid blocks per expert. The valid count
+    # stays on device, so estimate it from the mean routed rows per expert.
     if k_rotate is None:
         k_rotate = tokens * topk <= 2 * SORT_BLOCK_M * experts
     elif type(k_rotate) is not bool:
@@ -1281,8 +1236,8 @@ def fp8_blockscale_stage1(
     if type(persistent) is not bool:
         raise ValueError("persistent must be a bool")
     tasks = blocks * (intermediate // BLOCK_N)
-    # [step 2] Same kernel either way: persistent only sizes the grid.
-    workers = min(tasks, _cu_count(a.device)) if persistent else tasks
+    # Same kernel either way: persistent only sizes the grid.
+    workers = min(tasks, get_cu_num()) if persistent else tasks
     with torch.cuda.device(a.device):
         launcher = _compile_stage1(
             get_device_cache_key(), intermediate, hidden, topk, experts, k_rotate

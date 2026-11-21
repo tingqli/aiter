@@ -47,9 +47,12 @@ def compile_moe_gemm2(
         swiglu_limit,
     )
     if weight_quant_type == "block":
-        assert K % 128 == 0, "Blockscale Down requires K divisible by 128"
-        assert N % 128 == 0, "Blockscale Down requires N divisible by 128"
-        assert BLOCK_TILE_SIZE_N in (64, 128)
+        if K % 128:
+            raise ValueError("Blockscale Down requires K divisible by 128")
+        if N % 128:
+            raise ValueError("Blockscale Down requires N divisible by 128")
+        if BLOCK_TILE_SIZE_N not in (64, 128):
+            raise ValueError("Blockscale Down requires BLOCK_TILE_SIZE_N 64 or 128")
     if alg == "batch1":
         assert K % TILE_K == 0, "batch1 Down requires K divisible by 64"
     # The sorted algorithms bound the rows in moe_sorting.

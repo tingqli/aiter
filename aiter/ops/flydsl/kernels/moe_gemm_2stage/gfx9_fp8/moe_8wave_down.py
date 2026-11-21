@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+# Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # ruff: noqa: B023
 # Helpers run synchronously during FlyDSL tracing, capturing loop SSA by design.
 # Binding default arguments changes DSL state.
@@ -15,32 +16,28 @@ from functools import cache
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
+from aiter.jit.utils.chip_info import get_gfx_runtime
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled
 
 from . import common as fxh
-from .common import (
-    _ptr,
-    get_device_cache_key,
-)
-from .common import eltwise_op
 from .a8w8_blockscale_config import routed_down_lds_bytes
+from .common import _ptr, get_device_cache_key, permlane16_swap
+
+# One 8-wave workgroup per CU (waves_per_eu=2) on 256-CU gfx950.
+ROUTED_DOWN_WORKERS = 256
 
 
-def _atomic_add_i32(addr, value):
-    ptr = llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), arith._to_raw(addr))
-    return llvm.AtomicRMWOp(
-        llvm.AtomicBinOp.add,
-        ptr,
-        arith._to_raw(value),
-        llvm.AtomicOrdering.monotonic,
-        syncscope="agent",
-    ).res
+def _lds_llvm_ptr(address):
+    """Raw LDS byte address as the !llvm.ptr the async-LDS DMA intrinsic takes."""
+    return fx.to_llvm_ptr(
+        fx.inttoptr(
+            fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 4), address
+        )
+    )
 
 
 def recast_tensor(tensor, dtype):
@@ -108,15 +105,14 @@ class ROCDLBuffer:
 
         tid = fx.thread_idx.x
         wave = tid // fx.Int32(64)
-        zero_i32 = arith._to_raw(fx.Int32(0))
+        zero_i32 = fx.Int32(0).ir_value()
         wave_byte_offset = fx.Int32(
             fx.rocdl.readfirstlane(
                 T.i32,
-                arith._to_raw(wave * fx.Int32(64 * atom_bytes)),
+                (wave * fx.Int32(64 * atom_bytes)).ir_value(),
             )
         )
         lds_address = fx.Int32(fx.ptrtoint(ptr_dst)) + wave_byte_offset
-        lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
         src_base_byte_offset = fx.Int32(fx.ptrtoint(ptr_src) - self.base_offset)
         source_byte_offset = src_base_byte_offset + tid * fx.Int32(atom_bytes)
 
@@ -124,9 +120,9 @@ class ROCDLBuffer:
         for copy_round in range_constexpr(num_rounds):
             rocdl.raw_ptr_buffer_load_async_lds(
                 self.rsrc,
-                llvm.inttoptr(lds_ptr_type, arith._to_raw(lds_address)),
-                arith._to_raw(fx.Int32(atom_bytes)),
-                arith._to_raw(source_byte_offset),
+                _lds_llvm_ptr(lds_address),
+                fx.Int32(atom_bytes).ir_value(),
+                source_byte_offset.ir_value(),
                 zero_i32,
                 zero_i32,
                 aux=fxh.rocdl_aux(0),
@@ -139,15 +135,15 @@ class ROCDLBuffer:
             if tid < fx.Int32(tail_atoms):
                 rocdl.raw_ptr_buffer_load_async_lds(
                     self.rsrc,
-                    llvm.inttoptr(lds_ptr_type, arith._to_raw(lds_address)),
-                    arith._to_raw(fx.Int32(atom_bytes)),
-                    arith._to_raw(source_byte_offset),
+                    _lds_llvm_ptr(lds_address),
+                    fx.Int32(atom_bytes).ir_value(),
+                    source_byte_offset.ir_value(),
                     zero_i32,
                     zero_i32,
                     aux=fxh.rocdl_aux(0),
                 )
 
-            # Up to three residual dwords after the final 16-byte atom.
+        # Up to three residual dwords after the final 16-byte atom.
         if fx.const_expr(tail_dwords != 0):
             dword_source_base = src_base_byte_offset + fx.Int32(
                 (num_bytes // atom_bytes) * atom_bytes
@@ -156,28 +152,33 @@ class ROCDLBuffer:
             if tid < fx.Int32(tail_dwords):
                 rocdl.raw_ptr_buffer_load_async_lds(
                     self.rsrc,
-                    llvm.inttoptr(lds_ptr_type, arith._to_raw(dword_lds_address)),
-                    arith._to_raw(fx.Int32(dword_bytes)),
-                    arith._to_raw(dword_source_base + tid * fx.Int32(dword_bytes)),
+                    _lds_llvm_ptr(dword_lds_address),
+                    fx.Int32(dword_bytes).ir_value(),
+                    (dword_source_base + tid * fx.Int32(dword_bytes)).ir_value(),
                     zero_i32,
                     zero_i32,
                     aux=fxh.rocdl_aux(0),
                 )
 
+
 @cache
 def _compile_8wave_down(
     device_key, n, k, topk, num_experts, block_m, block_n, num_oc_splits
 ):
-    if device_key is None or device_key[2].split(":")[0] != "gfx950":
+    del device_key  # Cache key only.
+    if get_gfx_runtime() != "gfx950":
         raise ValueError("8-wave FP8 blockscale Down requires gfx950")
-    assert block_m == 256
-    assert block_n >= 32 and block_n % 32 == 0
-    assert k % 128 == 0 and n % num_oc_splits == 0
+    routed_down_lds_bytes(
+        n=n,
+        k=k,
+        topk=topk,
+        num_experts=num_experts,
+        block_m=block_m,
+        block_n=block_n,
+        num_oc_splits=num_oc_splits,
+    )
     n_split = n // num_oc_splits
-    assert n_split % block_n == 0
-    assert n_split % 128 == 0
     n_tiles_per_split = n_split // block_n
-    assert n_tiles_per_split >= 3
     n16_tiles_per_block = block_n // 16
     k_blocks = k // 128
     scale_n_blocks = n // 128
@@ -235,25 +236,14 @@ def _compile_8wave_down(
             lds.sorted_weights.ptr, fx.make_layout(block_m, 1)
         )
 
-        # weight_shuffled:
-        # [k16, n16, k/k16, n_split/n16, num_oc_splits, num_experts]
+        # weight_shuffled holds [num_experts, num_oc_splits] slabs of
+        # [k16, n16, k/k16, n_split/n16].
         assert k % 64 == 0
         assert n % 16 == 0
         k16 = 16 // (weight_shuffled.dtype.width // 8)
         n16 = 16
-        weight_shuffled = fx.make_view(
-            weight_shuffled,
-            fx.make_ordered_layout(
-                (
-                    k16,
-                    n16,
-                    k // k16,
-                    n_split // n16,
-                    num_oc_splits,
-                    num_experts,
-                ),
-                0,
-            ),
+        weight_slab_layout = fx.make_ordered_layout(
+            (k16, n16, k // k16, n_split // n16), 0
         )
 
         # The Int32 ring replaces k16 with four contiguous dwords.
@@ -307,8 +297,8 @@ def _compile_8wave_down(
         running = fx.Boolean(True)
         while running:
             if tid == fx.Int32(0):
-                lds_task_id[0] = fx.Int32(
-                    _atomic_add_i32(fx.ptrtoint(task_counter), fx.Int32(1))
+                lds_task_id[0] = fx.llvm.atomic_add(
+                    task_counter, fx.Int32(1), syncscope=fx.rocdl.SyncScope.Agent
                 )
             fx.barrier()
             task = lds_task_id[0]
@@ -379,8 +369,15 @@ def _compile_8wave_down(
                     num_threads,
                 )
 
-                # Select one [k16, n16, K/k16, n_split/n16] expert tile.
-                weight_expert = weight_shuffled[None, None, None, None, blk_oc, expert]
+                # Select one [k16, n16, K/k16, n_split/n16] expert/OC slab. The
+                # base is 64-bit: E*N*K can exceed 2 GiB, while a static-layout
+                # slice computes its offset in i32.
+                weight_expert = fx.make_view(
+                    weight_shuffled
+                    + fx.Int64(expert) * (n * k)
+                    + fx.Int64(blk_oc) * (n_split * k),
+                    weight_slab_layout,
+                )
                 weight_rsrc = ROCDLBuffer(weight_expert)
 
                 fx.rocdl.asyncmark()
@@ -434,12 +431,9 @@ def _compile_8wave_down(
                     )
 
                 def global_store(n_tile):
-                    """
-                        With physical operands ordered B,A, lane_mod16 selects the
-                        routed M row and each accumulator vector contains four
-                        contiguous N values. This is the same store-friendly
-                        distribution used by PyHIP's vaddr_rows construction.
-                    """  # fmt: skip
+                    # With physical operands ordered B,A, lane_mod16 selects the
+                    # routed M row and each accumulator vector holds four
+                    # contiguous N values; after the swap a lane stores 16 bytes.
                     n_base = blk_oc * fx.Int32(n_split) + fx.Int32(n_tile * block_n)
 
                     for mi in range_constexpr(num_mma_m):
@@ -450,29 +444,10 @@ def _compile_8wave_down(
                             d1_a = rocdl.cvt_pk_bf16_f32(c0[2], c0[3])
                             d0_b = rocdl.cvt_pk_bf16_f32(c1[0], c1[1])
                             d1_b = rocdl.cvt_pk_bf16_f32(c1[2], c1[3])
-                            pair_type = ir.Type.parse("!llvm.struct<(i32, i32)>")
-                            swap0 = rocdl.permlane16_swap(
-                                pair_type,
-                                arith._to_raw(d0_a),
-                                arith._to_raw(d0_b),
-                                False,
-                                False,
-                            )
-                            swap1 = rocdl.permlane16_swap(
-                                pair_type,
-                                arith._to_raw(d1_a),
-                                arith._to_raw(d1_b),
-                                False,
-                                False,
-                            )
+                            swap0 = permlane16_swap(d0_a, d0_b)
+                            swap1 = permlane16_swap(d1_a, d1_b)
                             output_values = Vec.from_elements(
-                                [
-                                    fx.Int32(llvm.extractvalue(T.i32, swap0, [0])),
-                                    fx.Int32(llvm.extractvalue(T.i32, swap1, [0])),
-                                    fx.Int32(llvm.extractvalue(T.i32, swap0, [1])),
-                                    fx.Int32(llvm.extractvalue(T.i32, swap1, [1])),
-                                ],
-                                fx.Int32,
+                                [swap0[0], swap1[0], swap0[1], swap1[1]], fx.Int32
                             )
                             swap_12_col = (lane_div16 & fx.Int32(1)) * fx.Int32(2) + (
                                 lane_div16 >> fx.Int32(1)
@@ -497,6 +472,17 @@ def _compile_8wave_down(
                                     slot,
                                 ].load()
                         b_scales_frag[kb] = lds_scale_b[noff // 128, kb]
+
+                def scaled_accumulate(partial, scale, accum):
+                    # Fused FMA keeps the cross-K rounding of the tuned kernel;
+                    # separate mul/add can flip a BF16 tie in the TOPK sum.
+                    return Vec.from_elements(
+                        [
+                            fx.fma(partial[i], scale, accum[i])
+                            for i in range_constexpr(4)
+                        ],
+                        fx.Float32,
+                    )
 
                 def compute():
                     acc_init = {}
@@ -525,11 +511,8 @@ def _compile_8wave_down(
                                         dequant_queue.pop(0)
                                     )
                                     if const_expr((mi0, ni0) in acc_init):
-                                        # Match PyHIP/tuned cross-K rounding. Separate mul/add
-                                        # can flip a BF16 tie and lose a TOPK-sum residual.
                                         acc[None, mi0, ni0].store(
-                                            eltwise_op(
-                                                "llvm.fma.f32",
+                                            scaled_accumulate(
                                                 c_mma_frag.load(),
                                                 mfma_scaleAB,
                                                 acc[None, mi0, ni0].load(),
@@ -546,8 +529,7 @@ def _compile_8wave_down(
                         c_mma_frag, mfma_scaleAB, (mi0, ni0) = dequant_queue.pop(0)
                         if const_expr((mi0, ni0) in acc_init):
                             acc[None, mi0, ni0].store(
-                                eltwise_op(
-                                    "llvm.fma.f32",
+                                scaled_accumulate(
                                     c_mma_frag.load(),
                                     mfma_scaleAB,
                                     acc[None, mi0, ni0].load(),
@@ -557,11 +539,11 @@ def _compile_8wave_down(
                             acc[None, mi0, ni0].store(c_mma_frag.load() * mfma_scaleAB)
                             acc_init[mi0, ni0] = True
 
-                """
-                 如果只依赖 MFMA operand dependency，那么确实只保证 lgkmcnt 在 MFMA 前，不能保证在 barrier 前；
-                 fx.barrier() 不是裸 barrier指令，它的 fence 语义使 LLVM 把自动等待放到了 barrier 前；
-                 当前显式 fxh.s_waitcnt(lgkmcnt=0) 是防御性流水线约束；避免global加载破坏正在被ds_read访问的LDS内容；
-                """
+                # Operand dependencies alone place lgkmcnt(0) before the MFMA,
+                # not before the barrier (fx.barrier's fence makes LLVM wait
+                # there). The explicit s_waitcnt(lgkmcnt=0) below is defensive:
+                # every ds_read of a B slot completes before the barrier that
+                # lets the next DMA overwrite it.
                 global_load_b(0)
                 fx.rocdl.asyncmark()
 
@@ -660,7 +642,7 @@ def _compile_8wave_down(
                 "rocdl.waves_per_eu": 2,
                 "rocdl.flat_work_group_size": "512,512",
             },
-        ).launch(grid=(256, 1, 1), block=(512, 1, 1), stream=stream)
+        ).launch(grid=(ROUTED_DOWN_WORKERS, 1, 1), block=(512, 1, 1), stream=stream)
 
     return launch
 
@@ -671,12 +653,12 @@ def flydsl_moe_gemm_8wave_down(
 ):
     """Build a stateless ten-tensor callable using native sort256 metadata.
 
-    K is a positive multiple of128, within the whole-K LDS/resource bounds.
+    K is a positive multiple of 128, within the whole-K LDS/resource bounds.
     Weights use shuffle_weight(16,16); A scales are physically [K/128,T*topk]
     and B scales are [E,N/128,K/128]. Output is routed [T,topk,N], not packed.
     The caller supplies one int32 counter, never shared by concurrent launches.
     """
-    lds_bytes = routed_down_lds_bytes(
+    routed_down_lds_bytes(
         n=n,
         k=k,
         topk=topk,
@@ -687,7 +669,7 @@ def flydsl_moe_gemm_8wave_down(
     )
     n_split, k_blocks, scale_n_blocks = n // num_oc_splits, k // 128, n // 128
 
-    def callable(
+    def down(
         output: torch.Tensor,
         input_q: torch.Tensor,
         weight_shuffled: torch.Tensor,
@@ -699,38 +681,6 @@ def flydsl_moe_gemm_8wave_down(
         num_valid_ids: torch.Tensor,
         task_counter: torch.Tensor,
     ):
-        num_tokens, input_topk, input_k = input_q.shape
-        runtime_num_experts, output_n, weight_k = weight_shuffled.shape
-        assert input_topk == topk and input_k == k
-        assert runtime_num_experts == num_experts
-        assert output_n == n and weight_k == k
-        assert output.shape == (num_tokens, topk, n)
-        assert input_scales.numel() == num_tokens * topk * k_blocks
-        assert weight_scales.shape == (num_experts, scale_n_blocks, k_blocks)
-        assert 0 < num_tokens < 1 << 24
-        assert input_q.dtype == weight_shuffled.dtype == torch.float8_e4m3fn
-        assert output.dtype == torch.bfloat16
-        assert (
-            input_scales.dtype
-            == weight_scales.dtype
-            == sorted_weights.dtype
-            == torch.float32
-        )
-        assert (
-            sorted_ids.dtype
-            == sorted_expert_ids.dtype
-            == num_valid_ids.dtype
-            == task_counter.dtype
-            == torch.int32
-        )
-        assert (
-            sorted_ids.ndim == sorted_expert_ids.ndim == 1
-            and sorted_weights.shape == sorted_ids.shape
-        )
-        assert (
-            sorted_expert_ids.numel() == (sorted_ids.numel() + 255) // 256
-        ), "native sort256 required"
-        assert num_valid_ids.numel() >= 1 and task_counter.numel() == 1
         tensors = (
             output,
             input_q,
@@ -743,22 +693,61 @@ def flydsl_moe_gemm_8wave_down(
             num_valid_ids,
             task_counter,
         )
-        assert all(
+        if not all(
             t.is_cuda and t.is_contiguous() and t.device == output.device
             for t in tensors
-        )
+        ):
+            raise ValueError("8-wave Down tensors must be contiguous on one GPU")
+        if (
+            input_q.dtype != torch.float8_e4m3fn
+            or weight_shuffled.dtype != torch.float8_e4m3fn
+            or output.dtype != torch.bfloat16
+            or any(
+                t.dtype != torch.float32
+                for t in (input_scales, weight_scales, sorted_weights)
+            )
+            or any(
+                t.dtype != torch.int32
+                for t in (sorted_ids, sorted_expert_ids, num_valid_ids, task_counter)
+            )
+        ):
+            raise ValueError("8-wave Down tensor dtype mismatch")
+        if (
+            input_q.ndim != 3
+            or weight_shuffled.ndim != 3
+            or sorted_ids.ndim != 1
+            or sorted_expert_ids.ndim != 1
+        ):
+            raise ValueError("8-wave Down expects 3D input/weights and 1D sorting")
+        num_tokens = input_q.shape[0]
+        if (
+            not 0 < num_tokens < 1 << 24
+            or input_q.shape[1:] != (topk, k)
+            or weight_shuffled.shape != (num_experts, n, k)
+            or output.shape != (num_tokens, topk, n)
+            or input_scales.numel() != num_tokens * topk * k_blocks
+            or weight_scales.shape != (num_experts, scale_n_blocks, k_blocks)
+            or sorted_weights.shape != sorted_ids.shape
+        ):
+            raise ValueError("8-wave Down input/weight/output shape mismatch")
+        if sorted_expert_ids.numel() != (sorted_ids.numel() + 255) // 256:
+            raise ValueError("8-wave Down requires native sort256")
+        if num_valid_ids.numel() < 1 or task_counter.numel() != 1:
+            raise ValueError("8-wave Down needs a valid-row count and one counter")
         # The masked row uses the descriptor end; adding its last column must not wrap.
-        assert (output.numel() + n) * 2 < 1 << 32 and input_q.numel() + k < 1 << 32
-        assert (
-            max(
+        if (
+            (output.numel() + n) * 2 >= 1 << 32
+            or input_q.numel() + k >= 1 << 32
+            or max(
                 input_scales.nbytes,
                 weight_scales.nbytes,
                 sorted_ids.nbytes,
                 n_split * k,
             )
-            < 1 << 32
-        )
-        assert sorted_expert_ids.numel() * num_oc_splits + 256 < 1 << 31
+            >= 1 << 32
+            or sorted_expert_ids.numel() * num_oc_splits + 256 >= 1 << 31
+        ):
+            raise ValueError("8-wave Down buffers must fit 32-bit byte offsets")
         with torch.cuda.device(output.device):
             launch = _compile_8wave_down(
                 get_device_cache_key(),
@@ -772,34 +761,13 @@ def flydsl_moe_gemm_8wave_down(
             )
             task_counter.zero_()
             stream = torch.cuda.current_stream(output.device)
-            compiled = getattr(launch, "_cf", None)
-            if compiled is None:
-                _run_compiled(
-                    launch,
-                    *[_ptr(t) for t in tensors],
-                    fx.Int32(num_tokens),
-                    fx.Int32(sorted_expert_ids.numel()),
-                    fx.Stream(stream.cuda_stream)
-                )
-            else:
-                compiled(
-                    *(t.data_ptr() for t in tensors),
-                    num_tokens,
-                    sorted_expert_ids.numel(),
-                    stream.cuda_stream
-                )
+            _run_compiled(
+                launch,
+                *[_ptr(t) for t in tensors],
+                fx.Int32(num_tokens),
+                fx.Int32(sorted_expert_ids.numel()),
+                fx.Stream(stream.cuda_stream),
+            )
         return output
 
-    callable.config = dict(  # noqa: C408 - Preserve the copied PyHIP AST.
-        block_m=block_m,
-        block_n=block_n,
-        k=k,
-        num_oc_splits=num_oc_splits,
-        num_waves=8,
-        sort_block_m=256,
-        output_layout="routed",
-        persistent_workgroups=256,
-        counter_reset=True,
-        lds_bytes=lds_bytes,
-    )
-    return callable
+    return down

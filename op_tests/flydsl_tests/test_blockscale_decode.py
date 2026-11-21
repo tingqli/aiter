@@ -12,7 +12,7 @@ import torch
 from aiter import ActivationType, QuantType
 from aiter.fused_moe import moe_sorting
 from aiter.fused_moe_registry import make_fused_moe_impl_kernel_name
-from aiter.jit.utils.chip_info import get_gfx
+from aiter.jit.utils.chip_info import get_gfx_runtime
 from aiter.ops.flydsl import fused_moe_gfx942 as backend
 from aiter.ops.shuffle import shuffle_weight
 from op_tests.test_flydsl_moe_blockscale import (
@@ -23,10 +23,14 @@ from op_tests.test_flydsl_moe_blockscale import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or get_gfx() not in ("gfx942", "gfx950"),
+    not torch.cuda.is_available() or get_gfx_runtime() not in ("gfx942", "gfx950"),
     reason="requires gfx942 or gfx950",
 )
-_FP8_DTYPE = torch.float8_e4m3fn if get_gfx() == "gfx950" else torch.float8_e4m3fnuz
+_FP8_DTYPE = (
+    torch.float8_e4m3fn
+    if torch.cuda.is_available() and get_gfx_runtime() == "gfx950"
+    else torch.float8_e4m3fnuz
+)
 
 
 def _config(tokens, block_n=64, direct=False):
@@ -250,7 +254,7 @@ def test_public_dispatch_and_output_buffer(
     )
     row = {
         "kernelName1": make_fused_moe_impl_kernel_name(
-            f"flydsl_{get_gfx()}", cfg.to_string()
+            f"flydsl_{get_gfx_runtime()}", cfg.to_string()
         ),
         "kernelName2": "",
         "block_m": 16,
@@ -303,7 +307,7 @@ def test_unsupported_requests_fail_before_kernel(change):
 
 def test_unsupported_arch_rejects_decode(monkeypatch):
     request, _ = _case(17)
-    monkeypatch.setattr(backend, "get_gfx", lambda: "gfx1250")
+    monkeypatch.setattr(backend, "get_gfx_runtime", lambda: "gfx1250")
     with pytest.raises(
         NotImplementedError, match="Unsupported FlyDSL MoE architecture"
     ):

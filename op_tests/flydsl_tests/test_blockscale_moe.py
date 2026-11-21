@@ -9,18 +9,26 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import aiter
 from aiter import ActivationType, QuantType
 from aiter.fused_moe import GateMode, moe_sorting
 from aiter.fused_moe_registry import make_fused_moe_impl_kernel_name
-from aiter.jit.utils.chip_info import get_gfx
+from aiter.jit.utils.chip_info import get_gfx_runtime
 from aiter.ops.flydsl import fused_moe_gfx942 as backend
-from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_8wave_down import flydsl_moe_gemm_8wave_down
-from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_gemm1 import fp8_blockscale_stage1
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_gemm1 import (
+    fp8_blockscale_stage1,
+)
 from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.a8w8_blockscale_gemm2 import (
     M128_QUEUE_SIZE,
     make_m128_down,
 )
-from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_packed_reduce import make_moe_sum
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_8wave_down import (
+    flydsl_moe_gemm_8wave_down,
+)
+from aiter.ops.flydsl.kernels.moe_gemm_2stage.gfx9_fp8.moe_packed_reduce import (
+    make_moe_sum,
+)
+from aiter.ops.shuffle import shuffle_weight
 from op_tests.test_flydsl_moe_blockscale import (
     check_result,
     prepare_case,
@@ -29,7 +37,8 @@ from op_tests.test_flydsl_moe_blockscale import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or get_gfx() != "gfx950", reason="requires gfx950"
+    not torch.cuda.is_available() or get_gfx_runtime() != "gfx950",
+    reason="requires gfx950",
 )
 _PATHS = ("block_m128", "block_m128_persistent", "block_8wave")
 
@@ -68,12 +77,25 @@ def test_whole_chain_k_rotate(path, k_rotate):
 
 
 @pytest.mark.parametrize(
+    "shape,config_string",
+    [
+        # Rows of the shipped MiMo-V2.6 flash/pro tuned configs (TP8).
+        ((2048, 4096, 256, 256, 8), "256_256_128_True:block_m128_persistent:0:128:8:1"),
+        ((1024, 6144, 256, 384, 8), "256_256_128_True:block_m128:0:128:4:0"),
+        ((1024, 6144, 256, 384, 8), "256_256_128_True:block_8wave:0:128:2:1"),
+    ],
+)
+def test_mimo_v2_6_tuned_configs(shape, config_string):
+    request, raw = prepare_case(*shape)
+    result = backend.run_flydsl_moe_gfx942_impl(request, config_string)
+    check_result(run_torch(request, raw), result, config_string)
+
+
+@pytest.mark.parametrize(
     "path,inter,n,splits",
     [
-        ("block_m128", 512, 128, 4),
-        ("block_m128_persistent", 512, 128, 4),
-        ("block_m128", 768, 128, 2),
-        ("block_m128_persistent", 1024, 128, 8),
+        ("block_m128", 256, 128, 4),
+        ("block_m128_persistent", 256, 128, 8),
         ("block_8wave", 128, 64, 4),
         ("block_8wave", 384, 64, 4),
         ("block_8wave", 640, 32, 8),
@@ -84,6 +106,63 @@ def test_whole_chain_k_rotate(path, k_rotate):
 def test_k_tiles_and_oc_splits(path, inter, n, splits):
     request, raw = prepare_case(33, 1024, inter, experts=5, topk=3)
     check_result(run_torch(request, raw), run(request, config(path, splits, n)), path)
+
+
+@pytest.mark.parametrize("path", ["block_m128", "block_m128_persistent"])
+@pytest.mark.parametrize("inter", [128, 384, 512, 1024])
+def test_m128_rejects_k_other_than_256(path, inter):
+    problem = backend._Problem(33, 5, 2 * inter, 1024, 1024, inter, 3, "block")
+    assert "K=256" in config(path).unsupported_reason(problem)
+    with pytest.raises(ValueError, match="K=256"):
+        make_m128_down(n=1024, k=inter, topk=3, num_experts=5)
+
+
+def test_8wave_down_weights_over_2gib():
+    # MiMo-V2.6-Pro TP2 Down: E*N*K = 384*6144*1024 bytes > 2 GiB, so the
+    # slabs of the last experts start past 2**31 bytes.
+    experts, n, k, tokens, topk = 384, 6144, 1024, 7, 2
+    if torch.cuda.mem_get_info()[0] < 8 << 30:
+        pytest.skip("needs 8 GiB of free GPU memory")
+    torch.manual_seed(5)
+    device = "cuda"
+    fp8 = torch.float8_e4m3fn
+    first = experts - 2
+    ids = torch.tensor([[first + 1, first]] * tokens, dtype=torch.int32, device=device)
+    weights = torch.rand(tokens, topk, dtype=torch.float32, device=device)
+    mid = torch.randn(tokens * topk, k, dtype=torch.bfloat16, device=device) / 10
+    dq, sd = aiter.get_torch_quant(QuantType.per_1x128)(mid, quant_dtype=fp8)
+    w_used = (torch.randn(2, n, k, device=device) / 10).to(fp8)
+    w2 = torch.zeros(experts, n, k, dtype=fp8, device=device)
+    w2[first:] = shuffle_weight(w_used, (16, 16))
+    w2_scale = torch.rand(experts, n // 128, k // 128, device=device) + 0.5
+    si, sw, se, valid, _ = moe_sorting(ids, weights, experts, n, torch.bfloat16, 256)
+    down = flydsl_moe_gemm_8wave_down(
+        n=n, k=k, topk=topk, num_experts=experts, block_n=32
+    )
+    routes = torch.full((tokens, topk, n), float("nan"), dtype=torch.bfloat16)
+    routes = routes.to(device)
+    counter = torch.empty(1, dtype=torch.int32, device=device)
+    down(
+        routes,
+        dq.view(tokens, topk, k),
+        w2,
+        sd.t().contiguous(),
+        w2_scale,
+        si,
+        sw,
+        se,
+        valid,
+        counter,
+    )
+    a = (dq.float().view(-1, k // 128, 128) * sd.view(-1, k // 128, 1)).view(-1, k)
+    reference = torch.empty_like(routes)
+    for slot in range(topk):
+        expert = int(ids[0, slot])
+        scale = w2_scale[expert].view(n // 128, 1, k // 128, 1)
+        w = w_used[expert - first].float().view(n // 128, 128, k // 128, 128) * scale
+        out = a.view(tokens, topk, k)[:, slot] @ w.view(n, k).t()
+        reference[:, slot] = (out * weights[:, slot, None]).to(torch.bfloat16)
+    check_result(reference, routes, "8-wave Down over 2 GiB")
 
 
 @pytest.mark.parametrize("path", _PATHS)
@@ -170,9 +249,7 @@ def test_down_counter_and_layout(path, sort_m):
     "path,inter",
     [
         ("block_m128", 256),
-        ("block_m128", 512),
         ("block_m128_persistent", 256),
-        ("block_m128_persistent", 512),
         ("block_8wave", 384),
         ("block_8wave", 640),
     ],
@@ -328,6 +405,6 @@ def test_unsupported_requests_fail_before_kernel(change):
 
 def test_gfx942_rejects_new_path(monkeypatch):
     request, _ = prepare_case(1, 256, 256)
-    monkeypatch.setattr(backend, "get_gfx", lambda: "gfx942")
+    monkeypatch.setattr(backend, "get_gfx_runtime", lambda: "gfx942")
     with pytest.raises(NotImplementedError, match="requires gfx950"):
         run(request, config("block_m128"))

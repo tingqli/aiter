@@ -107,7 +107,6 @@ def invert_sorted_ids(TOPK):
         sorted_ids: fx.Pointer,
         invert: fx.Pointer,
         p_num_valid: fx.Pointer,
-        num_ids: fx.Uint32,
         batch_size: fx.Uint32,
     ):
         batch = fx.block_idx.x
@@ -132,10 +131,11 @@ def invert_sorted_ids(TOPK):
         batch_size: fx.Uint32,
         stream,
     ):
+        # num_ids (the sorting capacity) only sizes the grid.
         grid_size = fxh.div_up(num_ids, num_threads)
-        invert_sorted_ids_kernel(
-            sorted_ids, invert, p_num_valid, num_ids, batch_size
-        ).launch(grid=(grid_size, 1, 1), block=(num_threads, 1, 1), stream=stream)
+        invert_sorted_ids_kernel(sorted_ids, invert, p_num_valid, batch_size).launch(
+            grid=(grid_size, 1, 1), block=(num_threads, 1, 1), stream=stream
+        )
 
     def callable(
         sorted_ids: torch.Tensor,

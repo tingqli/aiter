@@ -3,11 +3,11 @@
 # ruff: noqa: B023
 # Helpers run synchronously during FlyDSL tracing, capturing loop SSA by design.
 # Binding default arguments changes DSL state.
-"""gfx950 M128/4-wave FP8 Down with configurable K and OC splits.
+"""gfx950 M128/4-wave FP8 Down with K=256 and configurable OC splits.
 
-Consume native sort128 or sort256 and write packed BF16 M128/N64 tiles.
-K256 retains its PF3/paired pipeline; larger positive multiples of 256 stream
-K256 chunks through a fixed double buffer. Persistent queues are caller-owned.
+Consume native sort128 or sort256 and write packed BF16 M128/N64 tiles with a
+PF3 (independent) or paired (persistent) pipeline. Persistent queues are
+caller-owned.
 """
 
 from functools import cache
@@ -19,40 +19,41 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, range_constexpr, rocdl
 
+from aiter.jit.utils.chip_info import get_gfx_runtime
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled
 
 from . import common as fxh
+from .a8w8_blockscale_config import m128_down_lds_bytes
 from .common import (
+    BufferTensor,
+    LdsTensor,
     _ptr,
+    _scalar,
     asm_mark,
     get_device_cache_key,
+    permlane16_swap,
     pin_vgpr,
-    llvm_extract_as_vector,
 )
-from .common import LdsTensor, BufferTensor
-from .a8w8_blockscale_config import m128_down_lds_bytes
 
-M128_QUEUE_SIZE = 256  # Eight heads, spaced by 32 int32 elements; not OC splits.
-M128_CONTINUOUS_VMEM_CONFIG = {
-    "block_m": 128,
-    "block_n": 128,
-    "sort_block_m": 128,
-    "num_waves": 4,
-    "num_oc_splits": 8,
-    "xcd_count": 2,
-    "weight_cache_policy": 16,
-    "output_cache_policy": 18,
-    "output_layout": "packed",
-    "packed_rows": 128,
-}
-
-
-def _scalar(value):
-    return fx.Int32(rocdl.readfirstlane(fx.Int32.ir_type, value.ir_value()))
+# Persistent workers claim tasks from one queue head per XCD; worker w uses head
+# w % M128_QUEUE_HEADS. Heads are 32 int32 words (128 bytes) apart.
+M128_QUEUE_HEADS = 8
+M128_HEAD_STRIDE = 32
+M128_QUEUE_SIZE = M128_QUEUE_HEADS * M128_HEAD_STRIDE
+# Two 4-wave workgroups per CU (waves_per_eu=2) on 256-CU gfx950. The last of
+# each head's workers resets it, so the count per head must be exact.
+M128_PERSISTENT_WORKERS = 512
+assert M128_PERSISTENT_WORKERS % M128_QUEUE_HEADS == 0
 
 
 def _coalesce_output_pairs(first, second):
-    """Exchange a row bit with a column bit for contiguous 128-byte stores."""
+    """Exchange a row bit with a column bit for contiguous 128-byte stores.
+
+    Inline asm: rocdl.update_dpp(quad_perm 1,0,3,2) + select gives the same
+    values, but gfx9 has no VOP3 DPP and GCNDPPCombine does not fuse it, so it
+    emits v_mov_b32_dpp + v_cndmask_b32_e64 pairs instead of one
+    v_cndmask_b32_dpp each (measured +438 static instructions in this kernel).
+    """
     mask, even = fx.Uint64(0xAAAAAAAAAAAAAAAA), fx.Uint64(0x5555555555555555)
     assembly = ["s_mov_b64 vcc, $16"]
     assembly.extend(
@@ -74,7 +75,13 @@ def _coalesce_output_pairs(first, second):
         has_side_effects=True,
     )
     return [
-        llvm_extract_as_vector(fx.Int32, result, *([side * 4 + i] for i in range(4)))
+        fx.Vector.from_elements(
+            [
+                fx.Int32(llvm.extractvalue(fx.Int32.ir_type, result, [side * 4 + i]))
+                for i in range(4)
+            ],
+            fx.Int32,
+        )
         for side in range(2)
     ]
 
@@ -88,14 +95,9 @@ def _stage_end():
 def _pack_pair(c0, c1, route):
     words0 = (c0 * route).to(fx.BFloat16).bitcast(fx.Int32)
     words1 = (c1 * route).to(fx.BFloat16).bitcast(fx.Int32)
-    pair_type = ir.Type.parse("!llvm.struct<(i32, i32)>")
-    lo = rocdl.permlane16_swap(
-        pair_type, words0[0].ir_value(), words1[0].ir_value(), False, False
-    )
-    hi = rocdl.permlane16_swap(
-        pair_type, words0[1].ir_value(), words1[1].ir_value(), False, False
-    )
-    return llvm_extract_as_vector(fx.Int32, lo, [0], hi, [0], lo, [1], hi, [1])
+    lo = permlane16_swap(words0[0], words1[0])
+    hi = permlane16_swap(words0[1], words1[1])
+    return fx.Vector.from_elements([lo[0], hi[0], lo[1], hi[1]], fx.Int32)
 
 
 def _pack_output_steps(previous, cached_rows, packed):
@@ -121,21 +123,11 @@ def _pack_output_steps(previous, cached_rows, packed):
 
             swaps = []
             for word in range(2):
-                swaps.append(
-                    rocdl.permlane16_swap(
-                        ir.Type.parse("!llvm.struct<(i32, i32)>"),
-                        words[word].ir_value(),
-                        words[word + 2].ir_value(),
-                        False,
-                        False,
-                    )
-                )
+                swaps.append(permlane16_swap(words[word], words[word + 2]))
                 if word == 1:
                     lo, hi = swaps
                     packed[mi].append(
-                        llvm_extract_as_vector(
-                            fx.Int32, lo, [0], hi, [0], lo, [1], hi, [1]
-                        )
+                        fx.Vector.from_elements([lo[0], hi[0], lo[1], hi[1]], fx.Int32)
                     )
                 yield
 
@@ -144,10 +136,13 @@ def _pack_output_steps(previous, cached_rows, packed):
 def _compile_m128_down(
     device_key, n, topk, num_experts, persistent, is_sorted_bm_256, num_oc_splits
 ):
-    if device_key is None or device_key[2].split(":")[0] != "gfx950":
+    del device_key  # Cache key only.
+    if get_gfx_runtime() != "gfx950":
         raise ValueError("M128 blockscale Down requires gfx950")
     m_blocks_per_sort = 2 if is_sorted_bm_256 else 1
     width = 4 if persistent else 2
+    heads = M128_QUEUE_HEADS
+    workers_per_head = M128_PERSISTENT_WORKERS // heads
     n_split = n // num_oc_splits
     packets = n_split // 64
     scale_count = n_split // 128 * 2
@@ -158,10 +153,13 @@ def _compile_m128_down(
     task_offset = alive_offset + 2
     arena_words = task_offset + int(persistent)
     attrs = {
+        # Two waves per SIMD: two 4-wave workgroups per CU, 256 VGPRs per wave.
         "rocdl.waves_per_eu": 2,
         "rocdl.flat_work_group_size": "256,256",
         "llvm.passthrough": [
+            # Keep the retire FMAs scalar between MFMAs, as in GateUp.
             ["target-features", "-packed-fp32-ops"],
+            # MFMA accumulators stay in VGPRs; no AGPR copies around the packs.
             ["amdgpu-agpr-alloc", "0,0"],
         ],
     }
@@ -197,28 +195,20 @@ def _compile_m128_down(
             # Keep one claim site in the while header. Shards are independent
             # of the number of output-channel splits.
             if tid == 0:
-                head = counter + worker % 8 * 32
-                ptr = llvm.inttoptr(
-                    ir.Type.parse("!llvm.ptr<1>"), fx.ptrtoint(head).ir_value()
-                )
-                slot[0] = fx.Int32(
-                    llvm.AtomicRMWOp(
-                        llvm.AtomicBinOp.add,
-                        ptr,
-                        fx.Int32(1).ir_value(),
-                        llvm.AtomicOrdering.monotonic,
-                        syncscope="agent",
-                    ).res
+                slot[0] = fx.llvm.atomic_add(
+                    counter + worker % heads * M128_HEAD_STRIDE,
+                    fx.Int32(1),
+                    syncscope=fx.rocdl.SyncScope.Agent,
                 )
             fx.barrier()
             rank = _scalar(slot[0])
-            return rank * 8 + worker % 8
+            return rank * heads + worker % heads
 
         while (
             take_task(task_slot) if const_expr(persistent) else virtual
         ) < active_tasks:
             task = (
-                _scalar(task_slot[0]) * 8 + worker % 8
+                _scalar(task_slot[0]) * heads + worker % heads
                 if const_expr(persistent)
                 else virtual
             )
@@ -307,6 +297,9 @@ def _compile_m128_down(
                     if const_expr(persistent):
                         # Re-materialize invariant worker phase per task instead
                         # of keeping all derived N offsets live across the queue.
+                        # The opaque SGPR copy stops LLVM from hoisting them out
+                        # of the task loop: without it N4096/OC8 needs 106 SGPRs
+                        # (one spilled) and 203 VGPRs instead of 78 and 198.
                         phase_worker = fx.Int32(
                             llvm.inline_asm(
                                 fx.Int32.ir_type,
@@ -320,15 +313,19 @@ def _compile_m128_down(
                     def packet_index(q):
                         # Resident-worker phases retain B locality without making
                         # all consumers restart each task at the same N phase.
-                        rotation = phase_worker // 8
+                        rotation = phase_worker // heads
                         return (
                             (fx.Int32(q) // 2 + rotation) % (packets // 2)
                         ) * 2 + fx.Int32(q) % 2
 
                     def dma_turn(q, phase, turn):
-                        dst = llvm.inttoptr(
-                            ir.Type.parse("!llvm.ptr<3>"),
-                            (dma_base + phase * 16384 + turn * 4096).ir_value(),
+                        dst = fx.to_llvm_ptr(
+                            fx.inttoptr(
+                                fx.PointerType.get(
+                                    fx.Int32.ir_type, fx.AddressSpace.Shared, 16
+                                ),
+                                dma_base + phase * 16384 + turn * 4096,
+                            )
                         )
                         rocdl.raw_ptr_buffer_load_async_lds(
                             wrsrc,
@@ -548,12 +545,10 @@ def _compile_m128_down(
                                 if const_expr(kb == 0):
                                     accum[element, mi, ni] = value * factors[kb][mi]
                                 else:
-                                    accum[element, mi, ni] = fx.Float32(
-                                        llvm.intr_fma(
-                                            value.ir_value(),
-                                            factors[kb][mi].ir_value(),
-                                            accum[element, mi, ni].ir_value(),
-                                        )
+                                    accum[element, mi, ni] = fx.fma(
+                                        value,
+                                        factors[kb][mi],
+                                        accum[element, mi, ni],
                                     )
 
                         for kb in range_constexpr(2):
@@ -668,11 +663,13 @@ def _compile_m128_down(
 
         if const_expr(persistent):  # noqa: SIM102 - Compile-time/runtime split.
             if tid == 0:
-                # Each shard has 64 workers, but its task count can differ by
-                # one when OC splits do not make active_tasks divisible by 8.
-                shard_tasks = (active_tasks + 7 - worker % 8) // 8
-                if task_slot[0] == shard_tasks + 63:
-                    counter[worker % 8 * 32] = fx.Int32(0)
+                # Each head serves workers_per_head workers; its task count can
+                # differ by one when OC splits leave active_tasks indivisible.
+                # Every worker's last claim fails, so the last claim returns
+                # shard_tasks + workers_per_head - 1.
+                shard_tasks = (active_tasks + heads - 1 - worker % heads) // heads
+                if task_slot[0] == shard_tasks + workers_per_head - 1:
+                    counter[worker % heads * M128_HEAD_STRIDE] = fx.Int32(0)
 
     @flyc.jit
     def launch(
@@ -706,7 +703,11 @@ def _compile_m128_down(
             value_attrs=attrs,
         ).launch(
             grid=(
-                512 if const_expr(persistent) else capacity_blocks * num_oc_splits,
+                (
+                    M128_PERSISTENT_WORKERS
+                    if const_expr(persistent)
+                    else capacity_blocks * num_oc_splits
+                ),
                 1,
                 1,
             ),
@@ -732,18 +733,17 @@ def make_m128_down(
 
     num_oc_splits partitions N, not K. Each split must contain whole N128
     scale blocks (at least two N64 packets). Output is always packed by M128.
-    K is any positive multiple of 256 within the buffer-address and LDS bounds. K>256
-    streams fixed K256 chunks; scales are A[K/128,rows] and B[E,N/128,K/128].
+    K must be 256; scales are A[K/128,rows] and B[E,N/128,K/128].
     With sort256, expert_ids[m//2] serves both halves and a first-ID check skips
     empty tiles; arbitrary holes in the native valid prefix are not supported.
 
-    Persistent callers pass 256 zero-initialized int32 words as counter. The
-    eight heads self-reset before completion. Never share this storage across
-    concurrent launches; graph capture must retain its own queue allocation.
-    Independent calls accept an unused one-element counter and preserve it.
+    Persistent callers pass M128_QUEUE_SIZE zero-initialized int32 words as
+    counter. The heads self-reset before completion. Never share this storage
+    across concurrent launches; graph capture must retain its own queue
+    allocation. Independent calls accept an unused one-element counter and
+    preserve it.
     """
-    assert k == 256
-    lds_bytes = m128_down_lds_bytes(
+    m128_down_lds_bytes(
         n=n,
         k=k,
         topk=topk,
@@ -766,7 +766,6 @@ def make_m128_down(
         valid_ids,
         counter,
     ):
-        tokens, actual_topk, actual_k = input_q.shape
         tensors = (
             output,
             input_q,
@@ -779,52 +778,55 @@ def make_m128_down(
             valid_ids,
             counter,
         )
-        assert 0 < tokens < (1 << 24) and (actual_topk, actual_k) == (topk, k)
-        assert weight.shape == (num_experts, n, k) and output.shape == (
-            expert_ids.numel() * sort_block_m,
-            n,
-        )
-        assert (
-            input_q.dtype == weight.dtype == torch.float8_e4m3fn
-            and output.dtype == torch.bfloat16
-        )
-        assert (
-            input_scales.dtype
-            == weight_scales.dtype
-            == sorted_weights.dtype
-            == torch.float32
-        )
-        assert (
-            sorted_ids.dtype
-            == expert_ids.dtype
-            == valid_ids.dtype
-            == counter.dtype
-            == torch.int32
-        )
-        assert input_scales.numel() == tokens * topk * (
-            k // 128
-        ) and weight_scales.shape == (num_experts, n // 128, k // 128)
-        assert (
-            sorted_ids.ndim == expert_ids.ndim == 1
-            and sorted_ids.shape == sorted_weights.shape
-        )
-        assert (
-            expert_ids.numel()
-            == (sorted_ids.numel() + sort_block_m - 1) // sort_block_m
-        ), f"native sort{sort_block_m} required"
-        assert (
-            counter.numel() == (M128_QUEUE_SIZE if persistent else 1)
-            and valid_ids.numel() >= 1
-        )
-        assert all(
+        if not all(
             t.is_cuda and t.is_contiguous() and t.device == output.device
             for t in tensors
-        )
+        ):
+            raise ValueError("M128 Down tensors must be contiguous on one GPU")
+        if (
+            input_q.dtype != torch.float8_e4m3fn
+            or weight.dtype != torch.float8_e4m3fn
+            or output.dtype != torch.bfloat16
+            or any(
+                t.dtype != torch.float32
+                for t in (input_scales, weight_scales, sorted_weights)
+            )
+            or any(
+                t.dtype != torch.int32
+                for t in (sorted_ids, expert_ids, valid_ids, counter)
+            )
+        ):
+            raise ValueError("M128 Down tensor dtype mismatch")
+        if input_q.ndim != 3 or sorted_ids.ndim != 1 or expert_ids.ndim != 1:
+            raise ValueError("M128 Down expects input[T,topk,K] and 1D sorting")
+        tokens, actual_topk, actual_k = input_q.shape
+        if (
+            not 0 < tokens < (1 << 24)
+            or (actual_topk, actual_k) != (topk, k)
+            or weight.shape != (num_experts, n, k)
+            or output.shape != (expert_ids.numel() * sort_block_m, n)
+            or input_scales.numel() != tokens * topk * (k // 128)
+            or weight_scales.shape != (num_experts, n // 128, k // 128)
+            or sorted_ids.shape != sorted_weights.shape
+        ):
+            raise ValueError("M128 Down input/weight/output shape mismatch")
+        if (
+            expert_ids.numel()
+            != (sorted_ids.numel() + sort_block_m - 1) // sort_block_m
+        ):
+            raise ValueError(f"M128 Down requires native sort{sort_block_m}")
+        if counter.numel() != (M128_QUEUE_SIZE if persistent else 1):
+            raise ValueError("M128 Down counter size mismatch")
+        if valid_ids.numel() < 1:
+            raise ValueError("M128 Down requires a valid-row count")
         # The invalid-row voffset plus the last packet's soffset must not wrap.
-        assert (
-            output.numel() + 128 * n_split
-        ) * 2 < 1 << 32 and input_q.numel() < 1 << 32
-        assert input_scales.numel() * 4 < 1 << 32 and n_split * k < 1 << 32
+        if (
+            (output.numel() + 128 * n_split) * 2 >= 1 << 32
+            or input_q.numel() >= 1 << 32
+            or input_scales.numel() * 4 >= 1 << 32
+            or n_split * k >= 1 << 32
+        ):
+            raise ValueError("M128 Down buffers must fit 32-bit byte offsets")
         capacity_blocks = expert_ids.numel() * (sort_block_m // 128)
         with torch.cuda.device(output.device):
             launcher = _compile_m128_down(
@@ -846,18 +848,4 @@ def make_m128_down(
             )
         return output
 
-    down.config = {
-        **M128_CONTINUOUS_VMEM_CONFIG,
-        "persistent": persistent,
-        "k": k,
-        "num_oc_splits": num_oc_splits,
-        "sort_block_m": sort_block_m,
-        "is_sorted_bm_256": is_sorted_bm_256,
-        "scheduler": "sharded" if persistent else "independent",
-        "persistent_workgroups": 512 if persistent else 0,
-        "xcd_count": 4 if persistent else 2,
-        "lds_bytes": lds_bytes,
-    }
-    if persistent:
-        down.config["queue_self_reset"] = True
     return down

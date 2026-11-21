@@ -48,9 +48,12 @@ def compile_moe_gemm1(
         swiglu_limit,
     )
     if weight_quant_type == "block":
-        assert K % 512 == 0, "Blockscale Gate/Up requires K divisible by 512"
-        assert N % 256 == 0, "Blockscale Gate/Up requires each half divisible by 128"
-        assert BLOCK_TILE_SIZE_N in (32, 64, 128)
+        if K % 512:
+            raise ValueError("Blockscale Gate/Up requires K divisible by 512")
+        if N % 256:
+            raise ValueError("Blockscale Gate/Up requires each half divisible by 128")
+        if BLOCK_TILE_SIZE_N not in (32, 64, 128):
+            raise ValueError("Blockscale Gate/Up requires BLOCK_TILE_SIZE_N 32/64/128")
     if alg == "batch1":
         assert K % 256 == 0, "batch1 Gate/Up requires K divisible by 256"
     if fused_down_clear:
