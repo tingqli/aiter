@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""MegaMoEGfx942 (the gfx942 EP8 a8w4 / a8w8 MegaMoE) accuracy and performance on 8 GPUs.
+"""MegaMoEGfx942 (the gfx942 EP4 / EP8 a8w4 / a8w8 MegaMoE) accuracy and performance on 8
+(or, with ``--world 4``, 4) GPUs.
 
 The layer is DeepSeek-V4-Flash's MoE: H 4096, I 2048, 256 experts (32 per rank),
 top-6, silu with swiglu_limit 10. Every output is checked against an fp32 reference
@@ -36,9 +37,11 @@ and linear_beta 25). A layer that ``eligible()`` does not take is skipped.
 - test_capacity_checked_before_allocation: a capacity whose buffers the kernels cannot
   address is refused before any symmetric allocation.
 
-The test spawns its 8 processes:
+The test spawns its 8 processes (``--world 4``: 4, on GPUs 0-3 of HIP_VISIBLE_DEVICES):
 
     python3 op_tests/multigpu_tests/test_mega_moe_gfx942.py
+    HIP_VISIBLE_DEVICES=2,3,4,5 python3 op_tests/multigpu_tests/test_mega_moe_gfx942.py \\
+        --world 4 --model DeepSeek-V4.1-Flash
 """
 
 import argparse
@@ -69,6 +72,12 @@ from aiter.test_common import benchmark, checkAllclose, run_perftest
 from aiter.utility import fp4_utils
 
 WORLD = 8
+# Rows per rank of the default cases and of test_tiny_activations, by world size: the
+# ranks hold different counts, one holds none.
+WORLD_TOKENS = {
+    8: [(37, 1, 128, 5, 0, 100, 7, 77), (300, 1, 37, 999, 0, 128, 700, 64)],
+    4: [(37, 1, 128, 0), (300, 999, 0, 700)],
+}
 # Each model's MoE layer: H, I, experts, top-k, activation, swiglu_limit (0: no clamp).
 MODELS = {
     "DeepSeek-V4-Flash": (4096, 2048, 256, 6, "silu", 10.0),
@@ -104,9 +113,12 @@ def _free_port():
         return s.getsockname()[1]
 
 
-def _use_model(name):
-    """Point the layer shape (H, I, E, TOPK, ACT, SWIGLU_LIMIT, E_LOCAL) at ``name``'s."""
-    global H, I, E, TOPK, ACT, SWIGLU_LIMIT, E_LOCAL
+def _use_model(name, world=None):
+    """Point the layer shape (H, I, E, TOPK, ACT, SWIGLU_LIMIT, E_LOCAL) at ``name``'s
+    over ``world`` ranks (None: as it is)."""
+    global H, I, E, TOPK, ACT, SWIGLU_LIMIT, E_LOCAL, WORLD
+    if world is not None:
+        WORLD = int(world)
     H, I, E, TOPK, ACT, SWIGLU_LIMIT = MODELS[name]
     E_LOCAL = E // WORLD
 
@@ -554,7 +566,7 @@ def test_tiny_activations(weights):
     times larger) on the paths whose x quant is this layer's (main and small_M; large_M's
     ``forward`` and the ``pq`` paths take aiter's per_1x128 quant)."""
     rank, layers = _STATE["rank"], _STATE["layers"]
-    tokens = (37, 1, 128, 5, 0, 100, 7, 77)
+    tokens = WORLD_TOKENS[WORLD][0]
     every = ["main", "main pq", "large", "large pq", "small"]
     cases = ((0, -64, 120, every), (-123, 123, 0, ["main", "small"]))
     for x_gain, w1_gain, w2_gain, paths in cases:
@@ -573,13 +585,15 @@ def test_tiny_activations(weights):
 
 def test_capacity_checked_before_allocation(weights):
     """A capacity whose buffers the kernels cannot address is refused before the first
-    symmetric allocation: small_M at 2048 tokens per rank (a8w4: its fixed slots, 8 x
+    symmetric allocation: small_M at 2048 tokens per rank (a8w4: its fixed slots, WORLD x
     2048 rows per local expert, reach 2 GiB; a8w8 runs the main path there, refused at
-    16384), and max_tok_per_rank 16384 (large_M's receive rows)."""
+    16384 on 8 ranks), and max_tok_per_rank 16384 (large_M's receive rows; on 4 ranks
+    twice these)."""
     import mori.shmem as ms
 
     rank = _STATE["rank"]
-    small = 2048 if _STATE["quant"] == "a8w4" else 16384
+    big = 16384 * 8 // WORLD
+    small = 2048 if _STATE["quant"] == "a8w4" else big
     cases = {
         f"small_m_mtprs=({small},)": {
             "mtpr": MTPR,
@@ -587,7 +601,7 @@ def test_capacity_checked_before_allocation(weights):
             "large": True,
             "small_mtpr": small,
         },
-        "max_tok_per_rank=16384": {"mtpr": 16384, "small": False, "large": True},
+        f"max_tok_per_rank={big}": {"mtpr": big, "small": False, "large": True},
     }
     created, create = [], ms.mori_shmem_create_tensor
     ms.mori_shmem_create_tensor = lambda *a: created.append(a) or create(*a)
@@ -661,7 +675,7 @@ def _watchdog(rank):
 
 
 def _worker(rank, port, args):
-    _use_model(args.model)
+    _use_model(args.model, args.world)
     os.environ["MASTER_ADDR"], os.environ["MASTER_PORT"] = "localhost", str(port)
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
@@ -722,7 +736,15 @@ def _worker(rank, port, args):
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter,
-        description="MegaMoEGfx942 on 8 GPUs",
+        description="MegaMoEGfx942 on 8 (or 4) GPUs",
+    )
+    parser.add_argument(
+        "-w",
+        "--world",
+        type=int,
+        choices=sorted(WORLD_TOKENS),
+        default=8,
+        help="EP ranks (GPUs): the experts split over them",
     )
     parser.add_argument(
         "-q",
@@ -736,16 +758,16 @@ def main():
         "--model",
         choices=list(MODELS),
         default="DeepSeek-V4-Flash",
-        help="whose MoE layer, split over the 8 ranks",
+        help="whose MoE layer, split over the ranks",
     )
     parser.add_argument(
         "-t",
         "--tokens",
         type=dtypes.str2tuple,
         nargs="*",
-        default=[(37, 1, 128, 5, 0, 100, 7, 77), (300, 1, 37, 999, 0, 128, 700, 64)],
-        help=f"rows of each of the {WORLD} ranks (at most {MTPR}), "
-        "e.g. -t 37,1,128,5,0,100,7,77",
+        default=None,
+        help=f"rows of each rank (at most {MTPR}), e.g. -t 37,1,128,5,0,100,7,77 "
+        "(default: WORLD_TOKENS)",
     )
     parser.add_argument(
         "-g",
@@ -773,8 +795,10 @@ def main():
         help="routing of the full-capacity calls",
     )
     args = parser.parse_args()
-    _use_model(args.model)
-    # The worst-case receive buffer (8 x max_tok_per_rank x top-k rows) stays below 2 GiB.
+    _use_model(args.model, args.world)
+    args.tokens = args.tokens or WORLD_TOKENS[WORLD]
+    # The worst-case receive buffer (WORLD x max_tok_per_rank x top-k rows) stays below
+    # 2 GiB.
     args.mtpr = args.mtpr or [2048, 8192 if TOPK <= 6 else 4096]
     reason = _skip_reason(args.quant, args.model)
     if reason:

@@ -21,8 +21,8 @@ from contextlib import nullcontext
 import torch
 
 from ..host import peer_table, symmetric
+from ..protocol import EP_SIZES
 from .comm import (
-    NPES,
     ROW_BITS,
     SCHED_EXPECTED,
     ep_finish,
@@ -43,12 +43,13 @@ _PRODUCERS, _LAG = 16, 2
 
 
 def eligible(*, world_size, model_dim, inter_dim, experts, topk, act="silu"):
-    """Whether the mega kernel runs the layer: gfx942, EP8, one of _LAYERS, top-k <= 8, silu."""
+    """Whether the mega kernel runs the layer: gfx942, EP4 or EP8, one of _LAYERS, top-k <= 8, silu."""
     from aiter.jit.utils.chip_info import get_gfx_runtime
 
     return (
         get_gfx_runtime() == "gfx942"
-        and world_size == NPES
+        and world_size in EP_SIZES
+        and experts % world_size == 0
         and (model_dim, inter_dim, experts) in _LAYERS
         and 0 < topk <= _MAX_TOPK
         and act == "silu"
@@ -60,7 +61,7 @@ def _on(stream):
 
 
 class LargeMRuntime:
-    """One rank's EP8 MoE layer on the LDS mega kernel; ``xcds``: XCDs of the GPU, 8 (MI300X)
+    """One rank's EP4 / EP8 MoE layer on the LDS mega kernel; ``xcds``: XCDs of the GPU, 8 (MI300X)
     or 4 (MI308X)."""
 
     @staticmethod
@@ -124,7 +125,7 @@ class LargeMRuntime:
 
         self.rank, self.world, self.topk, self.experts = rank, world_size, topk, experts
         self.e_local = e_local = experts // world_size
-        o = layout(e_local)
+        o = layout(e_local, world_size)
         self.hidden, self.inter = model_dim, inter_dim
         self.swiglu_limit = float(swiglu_limit)
         self.wq = wq
@@ -285,6 +286,7 @@ class LargeMRuntime:
         routes = T * self.topk
         ep_prep(
             self.e_local,
+            self.world,
             ids,
             routes,
             self.rank,
@@ -301,6 +303,7 @@ class LargeMRuntime:
         )
         ep_plan(
             self.e_local,
+            self.world,
             self.slices,
             ids,
             self.route_idx,
@@ -317,7 +320,7 @@ class LargeMRuntime:
             self.sched,
         )
         ep_mega(self, x_q, x_scale, w, _PRODUCERS, _LAG)
-        ep_finish(self.e_local, self.rank, self.epoch, self.ws, t["ws"])
+        ep_finish(self.e_local, self.world, self.rank, self.epoch, self.ws, t["ws"])
         return out
 
     def rows_needed(self):

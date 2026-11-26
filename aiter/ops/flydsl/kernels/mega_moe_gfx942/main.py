@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""The main path's mega kernel (gfx942): an EP8 a8w4 MoE layer as one persistent kernel
-that dispatches the tokens (P2P), runs gemm1 and gemm2 interleaved, and adds every route
-into its source rank's output with BF16 atomics (the combine).
+"""The main path's mega kernel (gfx942): an EP4 / EP8 a8w4 MoE layer as one persistent
+kernel that dispatches the tokens (P2P), runs gemm1 and gemm2 interleaved, and adds every
+route into its source rank's output with BF16 atomics (the combine).
 
 The GEMM tiles are ``kloop._make_core``'s (fd2 mxfp4 W streamed into VGPRs, fp8 A
 through LDS). ``comm.py`` (quant, prep, plan, finish) runs around it.
@@ -76,7 +76,6 @@ from .mem import (
 from .protocol import (
     BLOCK_M,
     BUFFER_BYTES_MAX,
-    NPES,
     QSTRIDE,
     QUEUES,
     SCHED_EXPECTED,
@@ -100,6 +99,7 @@ def ep_mega_kernel(
     E_LOCAL,
     token_shift,
     XCDS,
+    NPES,
     producers=16,
     lag=2,
     ROWV=(32, 64, 128),
@@ -113,7 +113,8 @@ def ep_mega_kernel(
     BCM2=2,
     WQ="fp4",
 ):
-    """The mega kernel for (H, I, top-k) and ``E_LOCAL`` experts per rank;
+    """The mega kernel for (H, I, top-k) and ``E_LOCAL`` experts on each of ``NPES``
+    ranks (4 or 8);
     ``token_shift``: bits of the source
     token in a row's down id (max tokens per rank <= 1 << token_shift). ``XCDS``: XCDs of
     the GPU, 8 (MI300X) or 4 (MI308X). ``QX``: x scales
@@ -153,7 +154,7 @@ def ep_mega_kernel(
     TOPK_SHIFT = TOPK.bit_length() - 1
     SCALE_LANES = H // 128 * 4 // 16  # 16 B lanes of a row's x scales
     TOKEN_MASK = (1 << token_shift) - 1
-    E_GLOBAL, _, _, ARRIVED = ws_layout(E_LOCAL)
+    E_GLOBAL, _, _, ARRIVED = ws_layout(E_LOCAL, NPES)
     ROW_BITS = row_bits(E_GLOBAL)
     ROW_MASK = (1 << ROW_BITS) - 1
     E_SHIFT = E_LOCAL.bit_length() - 1
@@ -177,6 +178,7 @@ def ep_mega_kernel(
         + ("" if QX else "_xrow")
         + ("" if ACT == "silu" else f"_{ACT}")
         + ("" if XCDS == 8 else f"_x{XCDS}")
+        + ("" if NPES == 8 else f"_n{NPES}")
     )
 
     @fx.struct
@@ -1258,8 +1260,9 @@ class MainRuntime:
         rank (the real top-k; the padding slots take no row) plus one partial block per
         local expert. Refuses an ``mtpr`` whose rows the kernels cannot address."""
         tcap = 1 << max((int(mtpr) - 1).bit_length(), 1)
-        e_local, H = int(experts) // int(world_size), int(model_dim)
-        s_cap = -(-(NPES * tcap * int(topk) + e_local * BLOCK_M) // BLOCK_M) * BLOCK_M
+        npes = int(world_size)
+        e_local, H = int(experts) // npes, int(model_dim)
+        s_cap = -(-(npes * tcap * int(topk) + e_local * BLOCK_M) // BLOCK_M) * BLOCK_M
         if s_cap >= 1 << row_bits(int(experts)) or s_cap * H >= BUFFER_BYTES_MAX:
             raise ValueError(
                 f"max_tok_per_rank={mtpr}: {s_cap} receive rows of {H} bytes pass "
@@ -1289,7 +1292,7 @@ class MainRuntime:
         H, I, topk = int(model_dim), int(inter_dim), int(topk)
         self.model_dim, self.topk = H, topk
         e_local = int(experts) // self.world_size
-        _, _, _, arrived = ws_layout(e_local)
+        _, _, _, arrived = ws_layout(e_local, self.world_size)
         self.token_shift = max((int(mtpr) - 1).bit_length(), 1)
         self.tcap = tcap = 1 << self.token_shift
         s_cap = self.check_capacity(
@@ -1323,7 +1326,7 @@ class MainRuntime:
         self.send_info = torch.empty(tcap * kt, **i32)
         self.num_valid = torch.zeros(1, **i32)
         self.status = torch.zeros(8, **i32)
-        self.plan = torch.empty(comm.plan_layout(e_local)[-1], **i32)
+        self.plan = torch.empty(comm.plan_layout(e_local, self.world_size)[-1], **i32)
         self.expert_ids = torch.zeros(self.nblk, **i32)
         self.sched = torch.zeros(SCHED_EXPECTED + 2 * self.nblk, **i32)
         # the plan kernel: one workgroup per producer wave, up to 1024 routes each
@@ -1345,6 +1348,7 @@ class MainRuntime:
             "E_LOCAL": e_local,
             "token_shift": self.token_shift,
             "XCDS": xcds,
+            "NPES": self.world_size,
             "producers": _PRODUCERS,
             "lag": _LAG,
             "ACT": act,
@@ -1360,10 +1364,17 @@ class MainRuntime:
         # cache gemm1's W, and gemm2's with cache modifier 1.
         self.mega_big_k = host.launcher(ep_mega_kernel, d, **key, BCM1=0, BCM2=1)
         self.big_tokens = BLOCK_M * e_local // kt
+        npes = self.world_size
         self.quant_k = host.launcher(comm.mega_quant_kernel, d, H=H, QX=qx)
-        self.prep_k = host.launcher(comm.mega_prep_kernel, d, E_LOCAL=e_local)
-        self.plan_k = host.launcher(comm.mega_plan_kernel, d, E_LOCAL=e_local)
-        self.finish_k = host.launcher(comm.mega_finish_kernel, d, E_LOCAL=e_local)
+        self.prep_k = host.launcher(
+            comm.mega_prep_kernel, d, E_LOCAL=e_local, NPES=npes
+        )
+        self.plan_k = host.launcher(
+            comm.mega_plan_kernel, d, E_LOCAL=e_local, NPES=npes
+        )
+        self.finish_k = host.launcher(
+            comm.mega_finish_kernel, d, E_LOCAL=e_local, NPES=npes
+        )
 
     def forward(self, x, ids, wts, W, situ, x_scale=None):
         """x bf16 [T, H] (or fp8 with ``x_scale``), ids int32 / wts f32 [T, 8] (the
